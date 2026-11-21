@@ -2,7 +2,7 @@
   "name": "ec2-claude-vscode",
   "displayName": "EC2 Claude Bridge",
   "description": "Connect local projects via DevSpace MCP and SSH reverse tunnel to a remote Claude Code instance, with a native-style Agent chat sidebar and terminal.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.90.0"
@@ -76,6 +76,11 @@
       {
         "command": "ec2Claude.openSettings",
         "title": "EC2 Claude: 打开插件设置"
+      },
+      {
+        "command": "ec2Claude.syncRules",
+        "title": "EC2 Claude: 同步本地 CLAUDE.md 规则到远程",
+        "icon": "$(sync)"
       }
     ],
     "menus": {
@@ -197,6 +202,21 @@
           "type": "boolean",
           "default": true,
           "description": "每次发消息时自动附带轻量工作区现场（当前项目路径、打开的文件与行号、Git 分支与改动清单）"
+        },
+        "ec2Claude.syncLocalRules": {
+          "type": "boolean",
+          "default": false,
+          "description": "连接远程成功时，自动将本地 CLAUDE.md 规则无损合并同步到远程 ~/.claude/CLAUDE.md（不影响远程原有路由规则）"
+        },
+        "ec2Claude.localClaudeMdPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "~/.claude/CLAUDE.md"
+          ],
+          "description": "需要同步到远程的本地规则文件路径列表（按顺序合并，自动跳过不存在的文件）"
         }
       }
     }

@@ -59,10 +59,13 @@ import { Marked, Renderer } from "marked";
 
   const sessionTrigger = document.getElementById("sessionTrigger");
   const sessionTitleText = document.getElementById("sessionTitleText");
+  const quotaBtn = document.getElementById("quotaBtn");
+  const quotaText = document.getElementById("quotaText");
   const statusBtn = document.getElementById("statusBtn");
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
   const historyPopover = document.getElementById("historyPopover");
+  const quotaPopover = document.getElementById("quotaPopover");
   const permPopover = document.getElementById("permPopover");
   const modelPopover = document.getElementById("modelPopover");
   const permBtn = document.getElementById("permBtn");
@@ -140,6 +143,7 @@ import { Marked, Renderer } from "marked";
   function togglePopover(name) {
     openPopover = openPopover === name ? null : name;
     historyPopover.classList.toggle("open", openPopover === "history");
+    quotaPopover.classList.toggle("open", openPopover === "quota");
     permPopover.classList.toggle("open", openPopover === "perm");
     modelPopover.classList.toggle("open", openPopover === "model");
   }
@@ -148,6 +152,7 @@ import { Marked, Renderer } from "marked";
     if (!openPopover) return;
     openPopover = null;
     historyPopover.classList.remove("open");
+    quotaPopover.classList.remove("open");
     permPopover.classList.remove("open");
     modelPopover.classList.remove("open");
   }
@@ -157,6 +162,7 @@ import { Marked, Renderer } from "marked";
     if (
       target.closest(".popover") ||
       target.closest("#sessionTrigger") ||
+      target.closest("#quotaBtn") ||
       target.closest("#permBtn") ||
       target.closest("#modelBtn")
     ) {
@@ -166,6 +172,7 @@ import { Marked, Renderer } from "marked";
   });
 
   sessionTrigger.addEventListener("click", () => togglePopover("history"));
+  quotaBtn.addEventListener("click", () => togglePopover("quota"));
   permBtn.addEventListener("click", () => togglePopover("perm"));
   modelBtn.addEventListener("click", () => togglePopover("model"));
 
@@ -279,7 +286,123 @@ import { Marked, Renderer } from "marked";
     }
   }
 
+  function formatTokens(n) {
+    if (!n || n <= 0) return "0";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return Math.round(n / 1_000) + "K";
+    return String(n);
+  }
+
+  function formatResetHint(resetsAtSec) {
+    if (!resetsAtSec) return "";
+    const diffMs = resetsAtSec * 1000 - Date.now();
+    if (diffMs <= 0) {
+      return "已过重置时间，待下次对话刷新";
+    }
+    const totalMin = Math.ceil(diffMs / 60000);
+    const days = Math.floor(totalMin / (60 * 24));
+    const hours = Math.floor((totalMin % (60 * 24)) / 60);
+    const mins = totalMin % 60;
+    const d = new Date(resetsAtSec * 1000);
+    const pad = (v) => String(v).padStart(2, "0");
+    const clock = pad(d.getMonth() + 1) + "/" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    if (days > 0) {
+      return days + "天" + hours + "小时后重置 (" + clock + ")";
+    }
+    if (hours > 0) {
+      return hours + "小时" + mins + "分后重置 (" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ")";
+    }
+    return mins + "分钟后重置";
+  }
+
+  function renderQuotaPopover(state) {
+    const q = state.quota;
+    // 更新顶栏小胶囊
+    quotaBtn.className = "quota-pill";
+    if (!q || (!q.fiveHour && !q.sevenDay)) {
+      quotaText.textContent = "额度";
+    } else if (q.fiveHour) {
+      const expired = q.fiveHour.resetsAt && q.fiveHour.resetsAt * 1000 <= Date.now();
+      const pct = Math.min(100, Math.max(0, Math.round(q.fiveHour.utilization * 100)));
+      if (expired) {
+        quotaText.textContent = "5h 已重置";
+      } else {
+        quotaText.textContent = "5h " + pct + "%";
+        if (pct >= 95) quotaBtn.classList.add("danger");
+        else if (pct >= 80) quotaBtn.classList.add("warn");
+      }
+    } else if (q.sevenDay) {
+      const pct = Math.min(100, Math.max(0, Math.round(q.sevenDay.utilization * 100)));
+      quotaText.textContent = "7d " + pct + "%";
+    }
+
+    const updatedLabel = q && q.updatedAt
+      ? new Date(q.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : "未获取";
+
+    let bodyHtml = "";
+    if (!q || (!q.fiveHour && !q.sevenDay && !q.lastContextTokens)) {
+      bodyHtml =
+        '<div class="quota-empty">发送任意一条消息后，将自动捕获官方返回的 5 小时 / 7 天额度与重置倒计时（零额外请求）。</div>';
+    } else {
+      const renderBar = (label, win) => {
+        if (!win) return "";
+        const expired = win.resetsAt && win.resetsAt * 1000 <= Date.now();
+        const pct = expired ? 0 : Math.min(100, Math.max(0, Math.round(win.utilization * 100)));
+        const cls = pct >= 95 ? "danger" : pct >= 80 ? "warn" : "";
+        return (
+          '<div class="quota-row">' +
+          '<div class="quota-row-top"><span class="quota-row-label">' + label + '</span><span class="quota-row-val">已用 ' + pct + "%</span></div>" +
+          '<div class="quota-bar-track"><div class="quota-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+          (win.resetsAt ? '<div class="quota-reset">' + escapeHtml(formatResetHint(win.resetsAt)) + "</div>" : "") +
+          "</div>"
+        );
+      };
+
+      bodyHtml += renderBar("5 小时滚动额度", q.fiveHour);
+      bodyHtml += renderBar("7 天周期额度", q.sevenDay);
+
+      if (q.lastContextTokens && q.lastContextWindow) {
+        const ctxPct = Math.min(
+          100,
+          Math.round((q.lastContextTokens / q.lastContextWindow) * 1000) / 10
+        );
+        const cls = ctxPct >= 85 ? "danger" : ctxPct >= 65 ? "warn" : "";
+        bodyHtml +=
+          '<div class="quota-row">' +
+          '<div class="quota-row-top"><span class="quota-row-label">最近上下文</span><span class="quota-row-val">' +
+          formatTokens(q.lastContextTokens) + " / " + formatTokens(q.lastContextWindow) + " (" + ctxPct + "%)</span></div>" +
+          '<div class="quota-bar-track"><div class="quota-bar-fill ' + cls + '" style="width:' + Math.min(100, ctxPct) + '%"></div></div>' +
+          "</div>";
+      }
+    }
+
+    quotaPopover.innerHTML =
+      '<div class="quota-head"><span class="quota-head-title">Claude 实时额度</span><span class="quota-head-time">更新于 ' + escapeHtml(updatedLabel) + "</span></div>" +
+      bodyHtml +
+      '<div class="quota-actions">' +
+      '<button class="quota-act-btn" id="quotaOpenTermBtn">终端查 /usage</button>' +
+      '<button class="quota-act-btn" id="quotaSyncRulesBtn">同步 CLAUDE.md</button>' +
+      "</div>";
+
+    const openTermBtn = document.getElementById("quotaOpenTermBtn");
+    if (openTermBtn) {
+      openTermBtn.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openTerminal" });
+      });
+    }
+    const syncRulesBtn = document.getElementById("quotaSyncRulesBtn");
+    if (syncRulesBtn) {
+      syncRulesBtn.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "syncRules" });
+      });
+    }
+  }
+
   function renderPopovers(state) {
+    renderQuotaPopover(state);
     // 1. 历史会话
     const listHtml = (state.sessions || [])
       .map((s) => {

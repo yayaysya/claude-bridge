@@ -6,6 +6,7 @@ import { ClaudeClient } from "./claudeClient";
 import { getBridgeConfig } from "./config";
 import { ContextAttachment, SessionStore } from "./sessionStore";
 import { TerminalManager } from "./terminalManager";
+import { RulesSyncManager } from "./rulesSync";
 
 let bridgeManager: BridgeManager | undefined;
 let terminalManager: TerminalManager | undefined;
@@ -16,12 +17,14 @@ export function activate(context: vscode.ExtensionContext): void {
   terminalManager = new TerminalManager(output);
   const claudeClient = new ClaudeClient(output);
   const sessionStore = new SessionStore(context.globalState);
+  const rulesSync = new RulesSyncManager(output);
   const chatProvider = new ChatViewProvider(
     context.extensionUri,
     bridgeManager,
     claudeClient,
     sessionStore,
-    terminalManager
+    terminalManager,
+    rulesSync
   );
 
   // 注册左侧 Agent 聊天面板
@@ -71,9 +74,20 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  let prevBridgeStatus = bridgeManager.getState().status;
   updateStatusBar(bridgeManager.getState());
   context.subscriptions.push(
-    bridgeManager.onDidChangeState((st) => updateStatusBar(st))
+    bridgeManager.onDidChangeState((st) => {
+      updateStatusBar(st);
+      // 首次连上或重连恢复时，若开启了本地规则同步则静默合并同步
+      if (st.status === "connected" && prevBridgeStatus !== "connected") {
+        const cfg = getBridgeConfig();
+        if (cfg.syncLocalRules) {
+          void rulesSync.sync(cfg, { force: false });
+        }
+      }
+      prevBridgeStatus = st.status;
+    })
   );
 
   // 注册全部插件命令
@@ -163,6 +177,16 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
+    vscode.commands.registerCommand("ec2Claude.syncRules", async () => {
+      const cfg = getBridgeConfig();
+      const res = await rulesSync.sync(cfg, { force: true });
+      if (res.ok) {
+        vscode.window.showInformationMessage(res.message);
+      } else {
+        vscode.window.showWarningMessage(res.message);
+      }
+    }),
+
     vscode.commands.registerCommand("ec2Claude.showMenu", async () => {
       const state = bridgeManager?.getState();
       const items: Array<vscode.QuickPickItem & { action: string }> = [
@@ -190,6 +214,11 @@ export function activate(context: vscode.ExtensionContext): void {
           action: "disconnect",
         },
         {
+          label: "$(sync) 同步本地 CLAUDE.md 规则到远程",
+          description: "无损合并到远程 ~/.claude/CLAUDE.md",
+          action: "syncRules",
+        },
+        {
           label: "$(output) 查看连接日志",
           action: "logs",
         },
@@ -214,6 +243,8 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand("ec2Claude.connect");
       } else if (picked.action === "disconnect") {
         await vscode.commands.executeCommand("ec2Claude.disconnect");
+      } else if (picked.action === "syncRules") {
+        await vscode.commands.executeCommand("ec2Claude.syncRules");
       } else if (picked.action === "logs") {
         output.show(true);
       } else if (picked.action === "settings") {

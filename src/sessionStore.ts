@@ -50,8 +50,28 @@ export interface ChatSession {
   messages: ChatMessage[];
 }
 
+/** 单个额度时间窗口状态（来自 Claude Code 官方 rate_limit_event） */
+export interface RateLimitWindow {
+  utilization: number;
+  resetsAt?: number;
+  status?: string;
+}
+
+/** 持久化的最近一次官方额度与上下文快照 */
+export interface QuotaSnapshot {
+  fiveHour?: RateLimitWindow;
+  sevenDay?: RateLimitWindow;
+  status?: string;
+  isUsingOverage?: boolean;
+  updatedAt: number;
+  lastContextTokens?: number;
+  lastContextWindow?: number;
+  lastModel?: string;
+}
+
 const STORAGE_KEY = "ec2Claude.sessions.v1";
 const ACTIVE_KEY = "ec2Claude.activeSessionId.v1";
+const QUOTA_KEY = "ec2Claude.quota.v1";
 const MAX_SESSIONS = 40;
 
 /** 轻量级本地会话持久化管理器 */
@@ -126,6 +146,14 @@ export class SessionStore {
 
   public save(): void {
     void this.persist();
+  }
+
+  public getQuota(): QuotaSnapshot | undefined {
+    return this.state.get<QuotaSnapshot>(QUOTA_KEY);
+  }
+
+  public saveQuota(quota: QuotaSnapshot): void {
+    void this.state.update(QUOTA_KEY, quota);
   }
 
   private async persist(): Promise<void> {

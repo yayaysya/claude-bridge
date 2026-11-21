@@ -15,9 +15,11 @@ import {
 import {
   ChatMessage,
   ContextAttachment,
+  QuotaSnapshot,
   SessionStore,
 } from "./sessionStore";
 import { TerminalManager } from "./terminalManager";
+import { RulesSyncManager } from "./rulesSync";
 import {
   collectGitBadgeInfo,
   collectWorkspaceSnapshot,
@@ -42,7 +44,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly bridge: BridgeManager,
     private readonly claude: ClaudeClient,
     private readonly sessions: SessionStore,
-    private readonly terminal: TerminalManager
+    private readonly terminal: TerminalManager,
+    private readonly rulesSync: RulesSyncManager
   ) {
     this.bridge.onDidChangeState(() => {
       this.syncState();
@@ -162,6 +165,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         permissionMode: cfg.permissionMode,
         model: cfg.model,
         effort: cfg.effort,
+        syncLocalRules: cfg.syncLocalRules,
+        quota: this.sessions.getQuota() ?? null,
         workspacePath: getActiveWorkspacePath() ?? "",
         gitBadge: this.gitBadge ?? null,
         activeEditor,
@@ -192,6 +197,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const text = String(msg.text ?? "");
         if (text) {
           await vscode.env.clipboard.writeText(text);
+        }
+        break;
+      }
+
+      case "syncRules": {
+        const res = await this.rulesSync.sync(getBridgeConfig(), { force: true });
+        if (res.ok) {
+          vscode.window.showInformationMessage(res.message);
+        } else {
+          vscode.window.showWarningMessage(res.message);
         }
         break;
       }
@@ -403,6 +418,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         onSessionId: (sid) => {
           session.claudeSessionId = sid;
         },
+        onQuota: (partial) => {
+          const prev = this.sessions.getQuota();
+          const merged: QuotaSnapshot = {
+            ...prev,
+            ...partial,
+            updatedAt: partial.updatedAt ?? Date.now(),
+          };
+          this.sessions.saveQuota(merged);
+          throttledSync(true);
+        },
         onUpdate: () => {
           throttledSync(false);
         },
@@ -488,6 +513,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </button>
       </div>
       <div class="header-right">
+        <button id="quotaBtn" class="quota-pill" title="查看远程 Claude 额度与上下文占用">
+          <span id="quotaText">额度</span>
+        </button>
         <button id="statusBtn" class="status-dot-btn" title="点击一键连接或重连">
           <span id="statusDot" class="dot"></span>
           <span id="statusText">连接中</span>
@@ -513,6 +541,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </header>
 
     <div id="historyPopover" class="popover history-popover"></div>
+    <div id="quotaPopover" class="popover quota-popover"></div>
 
     <main id="messages" class="messages"></main>
 

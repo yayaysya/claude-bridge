@@ -6,12 +6,19 @@ import {
   getActiveWorkspacePath,
   shellQuote,
 } from "./config";
-import { ChatMessage, ContextAttachment, ToolCallRecord } from "./sessionStore";
+import {
+  ChatMessage,
+  ContextAttachment,
+  QuotaSnapshot,
+  RateLimitWindow,
+  ToolCallRecord,
+} from "./sessionStore";
 
 /** 远程对话执行回调 */
 export interface ClaudeRunCallbacks {
   onUpdate: () => void;
   onSessionId: (claudeSessionId: string) => void;
+  onQuota?: (partial: Partial<QuotaSnapshot>) => void;
 }
 
 /** 单次远程对话句柄，支持随时取消 */
@@ -250,6 +257,21 @@ export class ClaudeClient {
       if (evtType === "assistant") {
         const msgObj = evt.message as Record<string, unknown> | undefined;
         const msgId = typeof msgObj?.id === "string" ? msgObj.id : undefined;
+        const usageObj = msgObj?.usage as Record<string, unknown> | undefined;
+        if (usageObj && callbacks.onQuota) {
+          const inTok = Number(usageObj.input_tokens ?? 0);
+          const cacheRead = Number(usageObj.cache_read_input_tokens ?? 0);
+          const cacheCreate = Number(usageObj.cache_creation_input_tokens ?? 0);
+          const totalCtx = inTok + cacheRead + cacheCreate;
+          if (totalCtx > 0) {
+            callbacks.onQuota({
+              lastContextTokens: totalCtx,
+              lastModel:
+                typeof msgObj?.model === "string" ? msgObj.model : undefined,
+              updatedAt: Date.now(),
+            });
+          }
+        }
         const blocks = Array.isArray(msgObj?.content)
           ? (msgObj?.content as Array<Record<string, unknown>>)
           : [];
@@ -325,9 +347,67 @@ export class ClaudeClient {
         return;
       }
 
+      if (evtType === "rate_limit_event") {
+        const info = evt.rate_limit_info as Record<string, unknown> | undefined;
+        if (info && callbacks.onQuota) {
+          const unified = info.unifiedWindows as
+            | Record<string, unknown>
+            | undefined;
+          const parseWin = (raw: unknown): RateLimitWindow | undefined => {
+            if (!raw || typeof raw !== "object") {
+              return undefined;
+            }
+            const obj = raw as Record<string, unknown>;
+            if (typeof obj.utilization !== "number") {
+              return undefined;
+            }
+            return {
+              utilization: obj.utilization,
+              resetsAt:
+                typeof obj.resetsAt === "number" ? obj.resetsAt : undefined,
+              status: typeof obj.status === "string" ? obj.status : undefined,
+            };
+          };
+
+          const fiveHour = parseWin(unified?.five_hour);
+          const sevenDay = parseWin(unified?.seven_day);
+          if (fiveHour || sevenDay) {
+            callbacks.onQuota({
+              fiveHour,
+              sevenDay,
+              status: typeof info.status === "string" ? info.status : undefined,
+              isUsingOverage:
+                typeof info.isUsingOverage === "boolean"
+                  ? info.isUsingOverage
+                  : undefined,
+              updatedAt: Date.now(),
+            });
+          }
+        }
+        return;
+      }
+
       if (evtType === "result") {
         if (typeof evt.session_id === "string" && evt.session_id) {
           callbacks.onSessionId(evt.session_id);
+        }
+        // 提取当前模型的上下文窗口上限
+        const modelUsage = evt.modelUsage as
+          | Record<string, Record<string, unknown>>
+          | undefined;
+        if (modelUsage && callbacks.onQuota) {
+          const firstEntry = Object.entries(modelUsage)[0];
+          if (firstEntry) {
+            const [modelName, stats] = firstEntry;
+            const ctxWin = Number(stats?.contextWindow ?? 0);
+            if (ctxWin > 0) {
+              callbacks.onQuota({
+                lastContextWindow: ctxWin,
+                lastModel: modelName,
+                updatedAt: Date.now(),
+              });
+            }
+          }
         }
         const isError = Boolean(evt.is_error);
         const resultText = typeof evt.result === "string" ? evt.result : "";

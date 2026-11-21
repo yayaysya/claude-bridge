@@ -30,6 +30,8 @@ export interface BridgeConfig {
   autoReconnect: boolean;
   keepRunningOnClose: boolean;
   autoAttachWorkspaceContext: boolean;
+  syncLocalRules: boolean;
+  localClaudeMdPaths: string[];
 }
 
 /** 展开路径开头的 ~ 为当前用户家目录 */
@@ -88,6 +90,10 @@ export function getBridgeConfig(): BridgeConfig {
       "autoAttachWorkspaceContext",
       true
     ),
+    syncLocalRules: cfg.get<boolean>("syncLocalRules", false),
+    localClaudeMdPaths: cfg.get<string[]>("localClaudeMdPaths", [
+      "~/.claude/CLAUDE.md",
+    ]),
   };
 }
 
