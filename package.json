@@ -1,0 +1,218 @@
+{
+  "name": "ec2-claude-vscode",
+  "displayName": "EC2 Claude Bridge",
+  "description": "Connect local projects via DevSpace MCP and SSH reverse tunnel to a remote Claude Code instance, with a native-style Agent chat sidebar and terminal.",
+  "version": "0.3.2",
+  "publisher": "local-dev",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ec2-claude-sidebar",
+          "title": "EC2 Claude",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ec2-claude-sidebar": [
+        {
+          "type": "webview",
+          "id": "ec2Claude.chatView",
+          "name": "Claude 对话"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ec2Claude.connect",
+        "title": "EC2 Claude: 一键连接 / 重连",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "ec2Claude.disconnect",
+        "title": "EC2 Claude: 断开连接",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "ec2Claude.openChat",
+        "title": "EC2 Claude: 打开聊天面板"
+      },
+      {
+        "command": "ec2Claude.openTerminal",
+        "title": "EC2 Claude: 打开原生远程终端",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "ec2Claude.sendSelection",
+        "title": "EC2 Claude: 将选中代码发送到聊天"
+      },
+      {
+        "command": "ec2Claude.addCurrentFile",
+        "title": "EC2 Claude: 引用当前文件到聊天"
+      },
+      {
+        "command": "ec2Claude.showMenu",
+        "title": "EC2 Claude: 快捷操作菜单"
+      },
+      {
+        "command": "ec2Claude.showLogs",
+        "title": "EC2 Claude: 查看连接日志"
+      },
+      {
+        "command": "ec2Claude.openSettings",
+        "title": "EC2 Claude: 打开插件设置"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "ec2Claude.sendSelection",
+          "when": "editorHasSelection",
+          "group": "ec2Claude@1"
+        },
+        {
+          "command": "ec2Claude.addCurrentFile",
+          "when": "editorTextFocus",
+          "group": "ec2Claude@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "EC2 Claude Bridge",
+      "properties": {
+        "ec2Claude.sshHost": {
+          "type": "string",
+          "default": "",
+          "description": "远程服务器公网 IP 或域名（例如 1.2.3.4）"
+        },
+        "ec2Claude.sshUser": {
+          "type": "string",
+          "default": "ubuntu",
+          "description": "远程服务器 SSH 登录用户名"
+        },
+        "ec2Claude.sshPort": {
+          "type": "number",
+          "default": 22,
+          "description": "远程服务器 SSH 端口"
+        },
+        "ec2Claude.sshKeyPath": {
+          "type": "string",
+          "default": "",
+          "description": "本地 SSH 私钥 (.pem) 绝对路径（例如 ~/.ssh/my-ec2.pem）"
+        },
+        "ec2Claude.localPort": {
+          "type": "number",
+          "default": 7676,
+          "description": "本地 DevSpace MCP 监听端口"
+        },
+        "ec2Claude.remotePort": {
+          "type": "number",
+          "default": 7676,
+          "description": "远程服务器映射的回环端口"
+        },
+        "ec2Claude.devspacePath": {
+          "type": "string",
+          "default": "",
+          "description": "本地 devspace 可执行文件路径（留空则自动从 PATH 与 nvm 查找）"
+        },
+        "ec2Claude.remoteClaudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "远程服务器上 claude CLI 命令或绝对路径"
+        },
+        "ec2Claude.permissionMode": {
+          "type": "string",
+          "enum": [
+            "bypassPermissions",
+            "acceptEdits",
+            "plan",
+            "dontAsk"
+          ],
+          "enumDescriptions": [
+            "全部允许：自动执行读写和命令（推荐，可配合 Git 随时撤回）",
+            "自动改文件：自动放行编辑，危险命令受限",
+            "只读规划：只分析代码与给方案，不修改任何文件",
+            "严格限制：未预先授权的工具自动拒绝"
+          ],
+          "default": "bypassPermissions",
+          "description": "远程 Claude Code 权限模式"
+        },
+        "ec2Claude.model": {
+          "type": "string",
+          "default": "",
+          "description": "指定 Claude 模型名称（如 claude-opus-5-5、claude-fable-5-2[1m]、claude-sonnet-5-5、claude-haiku-5-5，留空使用远程默认）"
+        },
+        "ec2Claude.effort": {
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "enumDescriptions": [
+            "默认（跟随远程默认思考强度）",
+            "low：快速轻量思考",
+            "medium：日常均衡",
+            "high：深入推理分析",
+            "xhigh：复杂架构与疑难问题",
+            "max：最高思考深度"
+          ],
+          "default": "",
+          "description": "远程 Claude Code 思考强度 (--effort)"
+        },
+        "ec2Claude.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开 VS Code 时自动启动本地 DevSpace 并建立 SSH 反向隧道"
+        },
+        "ec2Claude.autoReconnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "隧道意外断开或电脑休眠唤醒后自动重连"
+        },
+        "ec2Claude.keepRunningOnClose": {
+          "type": "boolean",
+          "default": false,
+          "description": "关闭 VS Code 窗口时是否保留由本插件启动的后台服务与隧道"
+        },
+        "ec2Claude.autoAttachWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "每次发消息时自动附带轻量工作区现场（当前项目路径、打开的文件与行号、Git 分支与改动清单）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run typecheck && npm run build && npx @vscode/vsce package --allow-missing-repository --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.4.0",
+    "esbuild": "^0.25.0",
+    "marked": "^15.0.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,1132 @@
+:root {
+  --claude-orange: #d97757;
+  --claude-orange-hover: #e08465;
+  --claude-orange-soft: rgba(217, 119, 87, 0.14);
+  --claude-orange-border: rgba(217, 119, 87, 0.42);
+  --bg: var(--vscode-sideBar-background, #181818);
+  --surface: var(--vscode-editor-background, #1f1f1f);
+  --surface-2: var(--vscode-editorWidget-background, #242424);
+  --surface-hover: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
+  --border: var(--vscode-panel-border, rgba(255, 255, 255, 0.09));
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --fg: var(--vscode-foreground, #e5e5e5);
+  --muted: var(--vscode-descriptionForeground, #8e8e93);
+  --link: var(--vscode-textLink-foreground, #6cb6ff);
+  --success: #3fb950;
+  --warn: #d29922;
+  --danger: #f14c4c;
+  --purple: #b392f0;
+  --blue: #58a6ff;
+  --font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  --font-mono: var(--vscode-editor-font-family, "JetBrains Mono", Consolas, monospace);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: relative;
+}
+
+/* ===== 极简顶栏（对标 Claude Code） ===== */
+.header {
+  height: 40px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.session-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin-left: -4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.session-trigger:hover {
+  background: var(--surface-hover);
+}
+
+.brand-mark {
+  color: var(--claude-orange);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  color: var(--muted);
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.status-dot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  margin-right: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.status-dot-btn:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.55);
+}
+
+.dot.connecting {
+  background: var(--warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.dot.error {
+  background: var(--danger);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.12s, color 0.12s;
+}
+
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+/* ===== 历史会话下拉弹层 ===== */
+.popover {
+  position: absolute;
+  z-index: 50;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  padding: 5px;
+  display: none;
+}
+
+.popover.open {
+  display: block;
+}
+
+.history-popover {
+  top: 44px;
+  left: 10px;
+  right: 10px;
+  max-width: 360px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.popover-header {
+  padding: 5px 8px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.history-item:hover {
+  background: var(--surface-hover);
+}
+
+.history-item.active {
+  background: var(--claude-orange-soft);
+  color: var(--fg);
+}
+
+.history-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-sub {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.history-del {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.65;
+}
+
+.history-del:hover {
+  background: rgba(241, 76, 76, 0.16);
+  color: var(--danger);
+  opacity: 1;
+}
+
+/* ===== 主内容消息区 ===== */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scroll-behavior: smooth;
+}
+
+.messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.25);
+  border-radius: 999px;
+}
+
+/* 空状态：居中星芒欢迎页 */
+.welcome {
+  margin: auto;
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 12px 6px 24px;
+}
+
+.welcome-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--claude-orange-soft);
+  border: 1px solid var(--claude-orange-border);
+  color: var(--claude-orange);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
+.welcome h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.welcome-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+
+.ws-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 20px;
+  max-width: 100%;
+}
+
+.ws-badge span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompts-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.prompt-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.prompt-card:hover {
+  border-color: var(--claude-orange-border);
+  background: var(--surface-2);
+}
+
+.prompt-card-icon {
+  color: var(--claude-orange);
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+/* 用户消息（Claude Code 风格全宽柔和卡片） */
+.msg-user-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msg-user-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
+.att-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11.5px;
+  color: var(--fg);
+  max-width: 100%;
+}
+
+.file-chip-label {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip-label:hover {
+  color: var(--link);
+}
+
+.file-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 1px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.file-chip-x:hover {
+  color: var(--fg);
+}
+
+/* 助手消息 */
+.msg-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+/* Thinking 极简折叠 */
+details.thinking-block {
+  margin: 0;
+}
+
+details.thinking-block summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+  padding: 2px 0;
+}
+
+details.thinking-block summary::-webkit-details-marker {
+  display: none;
+}
+
+details.thinking-block summary:hover {
+  color: var(--fg);
+}
+
+.thinking-body {
+  margin-top: 6px;
+  padding: 4px 0 4px 11px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Claude Code 风格工具调用行 */
+.tools-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+details.tool-row {
+  border-radius: 7px;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+details.tool-row[open] {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+details.tool-row summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  font-size: 12px;
+  user-select: none;
+}
+
+details.tool-row summary::-webkit-details-marker {
+  display: none;
+}
+
+details.tool-row summary:hover {
+  background: var(--surface-hover);
+}
+
+.tool-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tool-dot.running {
+  background: var(--claude-orange);
+  animation: pulse 1s infinite;
+}
+
+.tool-dot.done {
+  background: var(--success);
+}
+
+.tool-dot.error {
+  background: var(--danger);
+}
+
+.tool-verb {
+  font-weight: 600;
+  color: var(--fg);
+  flex-shrink: 0;
+}
+
+.tool-target {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tool-detail {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.tool-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  color: var(--link);
+  cursor: pointer;
+}
+
+.tool-open-link:hover {
+  text-decoration: underline;
+}
+
+/* Markdown 正文 */
+.md {
+  line-height: 1.62;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.md p {
+  margin: 0 0 9px;
+}
+
+.md p:last-child {
+  margin-bottom: 0;
+}
+
+.md h1,
+.md h2,
+.md h3 {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.md h1 { font-size: 15px; }
+.md h2 { font-size: 14px; }
+.md h3 { font-size: 13.5px; }
+
+.md ul,
+.md ol {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md blockquote {
+  margin: 8px 0;
+  padding: 2px 10px;
+  border-left: 2px solid var(--claude-orange-border);
+  color: var(--muted);
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.md a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.md a:hover {
+  text-decoration: underline;
+}
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.md thead th {
+  text-align: left;
+  font-weight: 600;
+  padding: 7px 10px;
+  background: rgba(128, 128, 128, 0.09);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.md tbody td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.md tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md tbody tr:hover td {
+  background: rgba(128, 128, 128, 0.05);
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(128, 128, 128, 0.16);
+  padding: 1.5px 5px;
+  border-radius: 4px;
+}
+
+.code-block {
+  margin: 9px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.code-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(128, 128, 128, 0.06);
+  border-bottom: 1px solid var(--border);
+}
+
+.copy-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.copy-btn:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.code-block pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.streaming-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 0;
+}
+
+.streaming-star {
+  color: var(--claude-orange);
+  display: inline-flex;
+  animation: spin 2.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.msg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  padding-top: 2px;
+}
+
+.msg-meta-text {
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.msg-copy-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.msg-copy-btn.copied {
+  color: var(--success);
+}
+
+/* ===== 底部 Claude Code 一体化圆角输入卡片 ===== */
+.composer-outer {
+  padding: 8px 12px 12px;
+  flex-shrink: 0;
+  background: var(--bg);
+}
+
+.composer-card {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 8px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.composer-card:focus-within {
+  border-color: var(--claude-orange-border);
+  box-shadow: 0 0 0 1px var(--claude-orange-soft);
+}
+
+.composer-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.context-ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  max-width: 190px;
+}
+
+.context-ghost-btn:hover {
+  border-style: solid;
+  border-color: var(--claude-orange-border);
+  color: var(--fg);
+}
+
+.context-ghost-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  max-width: 240px;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.repo-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.repo-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-branch-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--claude-orange);
+  flex-shrink: 0;
+}
+
+.repo-dirty-count {
+  color: var(--claude-orange);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.ws-branch-sep {
+  opacity: 0.45;
+  margin: 0 2px;
+}
+
+textarea#promptInput {
+  width: 100%;
+  min-height: 44px;
+  max-height: 180px;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.48;
+  padding: 2px 2px;
+  outline: none;
+}
+
+textarea#promptInput::placeholder {
+  color: var(--muted);
+  opacity: 0.78;
+}
+
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.composer-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.composer-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 底部权限模式与模型自定义胶囊 */
+.pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.pill-btn:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.pill-btn.mode-bypass {
+  color: var(--claude-orange);
+  background: var(--claude-orange-soft);
+}
+
+.pill-btn.mode-accept {
+  color: var(--purple);
+  background: rgba(179, 146, 240, 0.12);
+}
+
+.pill-btn.mode-plan {
+  color: var(--blue);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.pill-btn.mode-dontAsk {
+  color: var(--warn);
+  background: rgba(210, 153, 34, 0.12);
+}
+
+/* 标志性暖橙圆形发送按钮 */
+.send-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: none;
+  background: var(--claude-orange);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s, transform 0.1s;
+}
+
+.send-circle:hover {
+  background: var(--claude-orange-hover);
+}
+
+.send-circle:active {
+  transform: scale(0.95);
+}
+
+.send-circle.muted {
+  opacity: 0.35;
+}
+
+.send-circle.stop {
+  background: var(--danger);
+  opacity: 1;
+}
+
+/* 底部向上弹出菜单（权限 & 模型） */
+.menu-popover {
+  bottom: 54px;
+  left: 12px;
+  width: 252px;
+}
+
+.menu-popover.model-popover {
+  left: 136px;
+  width: 268px;
+}
+
+.popover-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+
+.effort-section {
+  padding: 4px 6px 5px;
+}
+
+.effort-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.effort-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.effort-chip {
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.effort-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.effort-chip.selected {
+  border-color: var(--claude-orange-border);
+  background: var(--claude-orange-soft);
+  color: var(--claude-orange);
+  font-weight: 600;
+}
+
+.menu-option {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-option:hover {
+  background: var(--surface-hover);
+}
+
+.menu-option.selected {
+  background: var(--claude-orange-soft);
+}
+
+.menu-opt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-opt-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.menu-opt-desc {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.menu-check {
+  color: var(--claude-orange);
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
