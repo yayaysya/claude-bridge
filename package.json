@@ -2,7 +2,7 @@
   "name": "ec2-claude-vscode",
   "displayName": "EC2 Claude Bridge",
   "description": "Connect local projects via DevSpace MCP and SSH reverse tunnel to a remote Claude Code instance, with a native-style Agent chat sidebar and terminal.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.90.0"

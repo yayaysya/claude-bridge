@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import * as vscode from "vscode";
@@ -348,8 +349,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const filePath = String(msg.filePath ?? "");
         const startLine =
           typeof msg.startLine === "number" ? msg.startLine : undefined;
+        const endLine =
+          typeof msg.endLine === "number" ? msg.endLine : undefined;
         if (filePath) {
-          await this.openLocalFile(filePath, startLine);
+          await this.openLocalFile(filePath, startLine, endLine);
         }
         break;
       }
@@ -506,31 +509,142 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async openLocalFile(
     rawPath: string,
-    startLine?: number
+    startLine?: number,
+    endLine?: number
   ): Promise<void> {
     try {
-      let targetPath = rawPath;
-      if (!path.isAbsolute(targetPath)) {
-        const ws = getActiveWorkspacePath();
-        if (ws) {
-          targetPath = path.join(ws, targetPath);
-        }
+      const targetUri = await this.resolveLocalFileUri(rawPath);
+      if (!targetUri) {
+        vscode.window.showWarningMessage(`在当前工作区中未找到文件：${rawPath}`);
+        return;
       }
-      const uri = vscode.Uri.file(targetPath);
-      const doc = await vscode.workspace.openTextDocument(uri);
+
+      const doc = await vscode.workspace.openTextDocument(targetUri);
       const editor = await vscode.window.showTextDocument(doc, {
         preview: false,
       });
-      if (startLine && startLine > 0) {
-        const pos = new vscode.Position(Math.max(0, startLine - 1), 0);
-        editor.selection = new vscode.Selection(pos, pos);
+
+      if (startLine && startLine > 0 && doc.lineCount > 0) {
+        const clampedStart = Math.min(Math.max(1, startLine), doc.lineCount) - 1;
+        const clampedEnd =
+          endLine && endLine >= startLine
+            ? Math.min(endLine, doc.lineCount) - 1
+            : clampedStart;
+
+        const startLineObj = doc.lineAt(clampedStart);
+        const endLineObj = doc.lineAt(clampedEnd);
+        const startPos = new vscode.Position(
+          clampedStart,
+          startLineObj.firstNonWhitespaceCharacterIndex
+        );
+        const endPos = endLineObj.range.end;
+
+        editor.selection = new vscode.Selection(startPos, endPos);
         editor.revealRange(
-          new vscode.Range(pos, pos),
+          new vscode.Range(startPos, endPos),
           vscode.TextEditorRevealType.InCenter
         );
       }
     } catch (err) {
       vscode.window.showWarningMessage(`无法打开本地文件：${rawPath} (${err})`);
+    }
+  }
+
+  /** 智能解析绝对路径、相对路径或短文件名（如 FML_FileStore.c）为真实本地文件 URI */
+  private async resolveLocalFileUri(
+    rawInput: string
+  ): Promise<vscode.Uri | undefined> {
+    let cleaned = rawInput.trim();
+    if (cleaned.startsWith("file://")) {
+      try {
+        cleaned = vscode.Uri.parse(cleaned).fsPath;
+      } catch {
+        cleaned = cleaned.replace(/^file:\/\//, "");
+      }
+    }
+    cleaned = cleaned.replace(/\\/g, "/");
+
+    // 1. 绝对路径直接校验
+    if (path.isAbsolute(cleaned)) {
+      if (this.isExistingFile(cleaned)) {
+        return vscode.Uri.file(cleaned);
+      }
+      return undefined;
+    }
+
+    // 2. 相对当前打开的所有工作区根目录校验
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of folders) {
+      const candidate = path.join(folder.uri.fsPath, cleaned);
+      if (this.isExistingFile(candidate)) {
+        return vscode.Uri.file(candidate);
+      }
+    }
+
+    // 3. 短文件名或部分子路径：在当前工作区快速检索
+    const normalizedGlob = cleaned.replace(/^\.?\//, "");
+    let matches = await vscode.workspace.findFiles(
+      `**/${normalizedGlob}`,
+      "**/{node_modules,.git,build,dist}/**",
+      15
+    );
+    if (matches.length === 0) {
+      matches = await vscode.workspace.findFiles(
+        `**/${normalizedGlob}`,
+        "**/.git/**",
+        15
+      );
+    }
+
+    if (matches.length === 0) {
+      return undefined;
+    }
+    if (matches.length === 1) {
+      return matches[0];
+    }
+
+    // 若多个同名文件，优先匹配当前活动编辑器或已打开标签页中的唯一命中
+    const openPaths = new Set<string>();
+    const activePath = vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (activePath) {
+      const exactActive = matches.find((u) => u.fsPath === activePath);
+      if (exactActive) {
+        return exactActive;
+      }
+    }
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        const input = tab.input as { uri?: vscode.Uri } | undefined;
+        if (input?.uri && input.uri.scheme === "file") {
+          openPaths.add(input.uri.fsPath);
+        }
+      }
+    }
+    const openMatches = matches.filter((u) => openPaths.has(u.fsPath));
+    if (openMatches.length === 1) {
+      return openMatches[0];
+    }
+
+    // 仍有多个候选时弹出轻量选择器
+    const wsRoot = getActiveWorkspacePath();
+    const picked = await vscode.window.showQuickPick(
+      matches.map((uri) => ({
+        label: path.basename(uri.fsPath),
+        description: wsRoot
+          ? path.relative(wsRoot, uri.fsPath)
+          : uri.fsPath,
+        uri,
+      })),
+      { placeHolder: `找到多个匹配 ${rawInput} 的文件，请选择要跳转的文件` }
+    );
+    return picked?.uri;
+  }
+
+  private isExistingFile(filePath: string): boolean {
+    try {
+      return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+    } catch {
+      return false;
     }
   }
 

@@ -13,11 +13,109 @@ import { Marked, Renderer } from "marked";
       .replace(/"/g, "&quot;");
   }
 
+  // 识别常见代码/配置文件路径及行号引用（如 FML_FileStore.c:1818、main/foo.c:10-25、foo.h#L42）
+  const KNOWN_EXTS = new Set([
+    "c", "h", "cc", "hh", "cpp", "hpp", "cxx", "hxx", "ino",
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rs",
+    "java", "kt", "kts", "cs", "swift", "m", "mm", "rb", "php",
+    "md", "markdown", "json", "jsonc", "yaml", "yml", "toml",
+    "xml", "html", "htm", "css", "scss", "less", "vue", "svelte",
+    "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+    "cmake", "mk", "mak", "ld", "lds", "s", "asm", "proto",
+    "sql", "txt", "ini", "cfg", "conf", "env", "csv", "log",
+  ]);
+  const SPECIAL_FILENAMES = new Set([
+    "Makefile", "CMakeLists.txt", "Dockerfile", "Kconfig", "sdkconfig", "Kconfig.projbuild",
+  ]);
+
+  function parseFileReference(raw) {
+    if (!raw) return null;
+    const text = String(raw).trim();
+    if (!text || text.length > 260 || /\s/.test(text)) return null;
+    if (/^(https?:|mailto:|ftp:|data:)/i.test(text)) return null;
+
+    let candidate = text;
+    if (candidate.startsWith("file://")) {
+      candidate = candidate.replace(/^file:\/\//, "");
+    }
+
+    let filePath = candidate;
+    let startLine;
+    let endLine;
+
+    // 匹配 #L123 或 #L123-L145
+    const hashMatch = candidate.match(/^(.+?)#L(\d+)(?:-L?(\d+))?$/i);
+    if (hashMatch) {
+      filePath = hashMatch[1];
+      startLine = Number(hashMatch[2]);
+      if (hashMatch[3]) endLine = Number(hashMatch[3]);
+    } else {
+      // 匹配 :123、:123-145、:123:45
+      const colonMatch = candidate.match(/^(.+?):(\d+)(?:-(\d+)|:(\d+))?$/);
+      if (colonMatch) {
+        filePath = colonMatch[1];
+        startLine = Number(colonMatch[2]);
+        if (colonMatch[3]) endLine = Number(colonMatch[3]);
+      }
+    }
+
+    // 去掉可能残留的首尾引号或括号
+    filePath = filePath.replace(/^["'`(<]+|[>"'`)]+$/g, "");
+    if (!filePath || filePath.startsWith("-") || filePath.endsWith("/")) {
+      return null;
+    }
+
+    const baseName = filePath.split("/").pop() || "";
+    if (!baseName || baseName.startsWith(".")) {
+      return null;
+    }
+
+    const isSpecial = SPECIAL_FILENAMES.has(baseName);
+    const dotIdx = baseName.lastIndexOf(".");
+    const ext = dotIdx > 0 ? baseName.slice(dotIdx + 1).toLowerCase() : "";
+    if (!isSpecial && !KNOWN_EXTS.has(ext)) {
+      return null;
+    }
+
+    return {
+      filePath,
+      startLine: Number.isFinite(startLine) && startLine > 0 ? startLine : undefined,
+      endLine: Number.isFinite(endLine) && endLine > 0 ? endLine : undefined,
+    };
+  }
+
   // 配置支持 GFM 表格、有序列表、任务列表且禁用原始 HTML 注入的安全 Markdown 渲染器
   const mdRenderer = new Renderer();
 
   mdRenderer.html = function (token) {
     return escapeHtml(token.text ?? token.raw ?? "");
+  };
+
+  mdRenderer.codespan = function (token) {
+    const rawText = token.text ?? "";
+    const ref = parseFileReference(rawText);
+    if (ref) {
+      const lineHint = ref.startLine
+        ? ref.endLine
+          ? " 第 " + ref.startLine + "-" + ref.endLine + " 行"
+          : " 第 " + ref.startLine + " 行"
+        : "";
+      const tip = "点击在 VS Code 中跳转：" + ref.filePath + lineHint;
+      return (
+        '<code class="code-ref" data-open-file="' +
+        escapeHtml(ref.filePath) +
+        '" data-open-line="' +
+        (ref.startLine || "") +
+        '" data-open-end-line="' +
+        (ref.endLine || "") +
+        '" title="' +
+        escapeHtml(tip) +
+        '">' +
+        escapeHtml(rawText) +
+        "</code>"
+      );
+    }
+    return "<code>" + escapeHtml(rawText) + "</code>";
   };
 
   mdRenderer.code = function (token) {
@@ -42,8 +140,23 @@ import { Marked, Renderer } from "marked";
 
   mdRenderer.link = function (token) {
     const href = String(token.href ?? "");
-    const safe = /^(https?:|mailto:)/i.test(href);
     const label = this.parser.parseInline(token.tokens);
+    // 拦截本地文件链接（file:// 或相对文件路径），支持点击直接跳转到对应行
+    const fileRef = parseFileReference(href);
+    if (fileRef) {
+      return (
+        '<a href="#" data-open-file="' +
+        escapeHtml(fileRef.filePath) +
+        '" data-open-line="' +
+        (fileRef.startLine || "") +
+        '" data-open-end-line="' +
+        (fileRef.endLine || "") +
+        '">' +
+        label +
+        "</a>"
+      );
+    }
+    const safe = /^(https?:|mailto:)/i.test(href);
     if (!safe) {
       return label;
     }
@@ -746,11 +859,13 @@ import { Marked, Renderer } from "marked";
     });
 
     messagesEl.querySelectorAll("[data-open-file]").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
         vscode.postMessage({
           type: "openFile",
           filePath: el.dataset.openFile,
           startLine: el.dataset.openLine ? Number(el.dataset.openLine) : undefined,
+          endLine: el.dataset.openEndLine ? Number(el.dataset.openEndLine) : undefined,
         });
       });
     });

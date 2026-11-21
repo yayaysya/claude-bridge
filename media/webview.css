@@ -919,6 +919,20 @@ details.tool-row summary:hover {
   border-radius: 4px;
 }
 
+.md code.code-ref {
+  cursor: pointer;
+  color: var(--link);
+  border: 1px solid rgba(108, 182, 255, 0.24);
+  background: rgba(108, 182, 255, 0.08);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.md code.code-ref:hover {
+  background: rgba(108, 182, 255, 0.18);
+  border-color: rgba(108, 182, 255, 0.5);
+  text-decoration: underline;
+}
+
 .code-block {
   margin: 9px 0;
   border: 1px solid var(--border);
