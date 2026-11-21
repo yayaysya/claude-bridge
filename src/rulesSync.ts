@@ -25,15 +25,18 @@ export interface RulesSyncResult {
   message: string;
 }
 
+const RULES_HASH_STORAGE_KEY = "ec2Claude.lastSyncedRulesHash.v1";
+
 /**
  * 本地 CLAUDE.md 规则同步器
  * 使用起止标记区块无损合并到远程 ~/.claude/CLAUDE.md，
- * 既保留远程已有的 DevSpace 路由规则，又能持续同步本地个人规则。
+ * 并通过 globalState 持久化内容指纹，重启 VS Code 后内容无变化也不重复传输。
  */
 export class RulesSyncManager {
-  private lastSyncedHash: string | undefined;
-
-  constructor(private readonly output: vscode.OutputChannel) {}
+  constructor(
+    private readonly output: vscode.OutputChannel,
+    private readonly state: vscode.Memento
+  ) {}
 
   /** 读取本地配置的所有规则文件并同步至远程 ~/.claude/CLAUDE.md */
   public async sync(
@@ -97,7 +100,8 @@ export class RulesSyncManager {
       .update(`${cfg.sshHost}:${cfg.sshUser}\n${mergedBody}`)
       .digest("hex");
 
-    if (!options?.force && this.lastSyncedHash === hash) {
+    const savedHash = this.state.get<string>(RULES_HASH_STORAGE_KEY);
+    if (!options?.force && savedHash === hash) {
       return {
         ok: true,
         skippedUnchanged: true,
@@ -183,7 +187,7 @@ export class RulesSyncManager {
       };
     }
 
-    this.lastSyncedHash = hash;
+    await this.state.update(RULES_HASH_STORAGE_KEY, hash);
     const totalBytes = Buffer.byteLength(mergedBody, "utf8");
     const fileNames = existingFiles.map((f) => path.basename(f.filePath)).join(", ");
     this.output.appendLine(

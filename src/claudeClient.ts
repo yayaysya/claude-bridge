@@ -68,6 +68,74 @@ export class ClaudeClient {
     }
   }
 
+  /**
+   * 后台静默调用远程官方 `/usage` 命令获取实时额度（0 Token，不弹终端）
+   */
+  public async fetchQuota(
+    cfg: BridgeConfig
+  ): Promise<Partial<QuotaSnapshot> | undefined> {
+    if (!cfg.sshHost || !cfg.sshUser || !cfg.sshKeyPath) {
+      return undefined;
+    }
+
+    const claudeBin = shellQuote(cfg.remoteClaudePath || "claude");
+    const remoteCmd = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; exec ${claudeBin} -p --output-format stream-json --verbose --no-session-persistence`;
+    const sshArgs = [
+      ...buildBaseSshArgs(cfg, { batchMode: true }),
+      `${cfg.sshUser}@${cfg.sshHost}`,
+      remoteCmd,
+    ];
+
+    this.output.appendLine("[Quota] 正在后台静默查询远程 Claude 额度 (/usage)");
+
+    return new Promise((resolve) => {
+      const child = spawn("ssh", sshArgs, { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let settled = false;
+
+      const finish = (result: Partial<QuotaSnapshot> | undefined) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // 忽略
+        }
+        this.output.appendLine("[Quota] 后台查询额度超时");
+        finish(undefined);
+      }, 20_000);
+
+      child.stdout?.on("data", (buf: Buffer) => {
+        stdout += buf.toString("utf8");
+      });
+
+      child.on("error", (err) => {
+        this.output.appendLine(`[Quota] 后台查询额度失败: ${err.message}`);
+        finish(undefined);
+      });
+
+      child.on("close", () => {
+        const parsed = parseUsageOutput(stdout);
+        if (parsed) {
+          this.output.appendLine(
+            `[Quota] 获取成功: 5h=${Math.round((parsed.fiveHour?.utilization ?? 0) * 100)}%, 7d=${Math.round((parsed.sevenDay?.utilization ?? 0) * 100)}%`
+          );
+        }
+        finish(parsed);
+      });
+
+      child.stdin?.write("/usage", "utf8");
+      child.stdin?.end();
+    });
+  }
+
   /** 将实时工作区快照、附加文件/选区与用户输入组装成清晰 Prompt */
   public buildPrompt(
     userText: string,
@@ -583,4 +651,74 @@ function truncateText(text: string, maxLen: number): string {
     return text;
   }
   return `${text.slice(0, maxLen)}\n... (已截断，共 ${text.length} 字符)`;
+}
+
+/** 解析 `/usage` 命令的 stream-json 输出，提取 5h/7d 官方额度与重置时间 */
+function parseUsageOutput(rawStdout: string): Partial<QuotaSnapshot> | undefined {
+  const lines = rawStdout.split(/\r?\n/);
+  let fiveHour: RateLimitWindow | undefined;
+  let sevenDay: RateLimitWindow | undefined;
+  let isUsingOverage: boolean | undefined;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith("{")) {
+      continue;
+    }
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    const usageReport = obj.usage_report as Record<string, unknown> | undefined;
+    const rateLimits = usageReport?.rate_limits as
+      | Record<string, unknown>
+      | undefined;
+    const limitsArr = Array.isArray(rateLimits?.limits)
+      ? (rateLimits?.limits as Array<Record<string, unknown>>)
+      : [];
+
+    for (const item of limitsArr) {
+      const kind = String(item.kind ?? "");
+      const group = String(item.group ?? "");
+      const percent = typeof item.percent === "number" ? item.percent : undefined;
+      if (percent === undefined) {
+        continue;
+      }
+      const resetsAtMs =
+        typeof item.resets_at === "string" ? Date.parse(item.resets_at) : NaN;
+      const win: RateLimitWindow = {
+        utilization: Math.max(0, percent / 100),
+        resetsAt: Number.isFinite(resetsAtMs)
+          ? Math.floor(resetsAtMs / 1000)
+          : undefined,
+        status: typeof item.severity === "string" ? item.severity : undefined,
+      };
+      if (kind === "session" || group === "session") {
+        fiveHour = win;
+      } else if (kind === "weekly_all" || group === "weekly") {
+        sevenDay = win;
+      }
+    }
+
+    const extraUsage = rateLimits?.extra_usage as
+      | Record<string, unknown>
+      | undefined;
+    if (extraUsage && typeof extraUsage.is_enabled === "boolean") {
+      isUsingOverage = extraUsage.is_enabled;
+    }
+  }
+
+  if (!fiveHour && !sevenDay) {
+    return undefined;
+  }
+
+  return {
+    fiveHour,
+    sevenDay,
+    isUsingOverage,
+    updatedAt: Date.now(),
+  };
 }

@@ -66,6 +66,7 @@ import { Marked, Renderer } from "marked";
   const statusText = document.getElementById("statusText");
   const historyPopover = document.getElementById("historyPopover");
   const quotaPopover = document.getElementById("quotaPopover");
+  const settingsPopover = document.getElementById("settingsPopover");
   const permPopover = document.getElementById("permPopover");
   const modelPopover = document.getElementById("modelPopover");
   const permBtn = document.getElementById("permBtn");
@@ -139,11 +140,14 @@ import { Marked, Renderer } from "marked";
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   const ICON_CHECK =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  const ICON_REFRESH =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>';
 
   function togglePopover(name) {
     openPopover = openPopover === name ? null : name;
     historyPopover.classList.toggle("open", openPopover === "history");
     quotaPopover.classList.toggle("open", openPopover === "quota");
+    settingsPopover.classList.toggle("open", openPopover === "settings");
     permPopover.classList.toggle("open", openPopover === "perm");
     modelPopover.classList.toggle("open", openPopover === "model");
   }
@@ -153,6 +157,7 @@ import { Marked, Renderer } from "marked";
     openPopover = null;
     historyPopover.classList.remove("open");
     quotaPopover.classList.remove("open");
+    settingsPopover.classList.remove("open");
     permPopover.classList.remove("open");
     modelPopover.classList.remove("open");
   }
@@ -163,6 +168,7 @@ import { Marked, Renderer } from "marked";
       target.closest(".popover") ||
       target.closest("#sessionTrigger") ||
       target.closest("#quotaBtn") ||
+      target.closest("#settingsBtn") ||
       target.closest("#permBtn") ||
       target.closest("#modelBtn")
     ) {
@@ -172,7 +178,12 @@ import { Marked, Renderer } from "marked";
   });
 
   sessionTrigger.addEventListener("click", () => togglePopover("history"));
-  quotaBtn.addEventListener("click", () => togglePopover("quota"));
+  quotaBtn.addEventListener("click", () => {
+    togglePopover("quota");
+    if (openPopover === "quota" && (!currentState || !currentState.quota)) {
+      vscode.postMessage({ type: "refreshQuota" });
+    }
+  });
   permBtn.addEventListener("click", () => togglePopover("perm"));
   modelBtn.addEventListener("click", () => togglePopover("model"));
 
@@ -191,7 +202,7 @@ import { Marked, Renderer } from "marked";
   });
 
   document.getElementById("settingsBtn").addEventListener("click", () => {
-    vscode.postMessage({ type: "openSettings" });
+    togglePopover("settings");
   });
 
   document.getElementById("attachBtn").addEventListener("click", () => {
@@ -336,14 +347,20 @@ import { Marked, Renderer } from "marked";
       quotaText.textContent = "7d " + pct + "%";
     }
 
-    const updatedLabel = q && q.updatedAt
-      ? new Date(q.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-      : "未获取";
+    const updatedLabel = state.isRefreshingQuota
+      ? "正在查询..."
+      : q && q.updatedAt
+        ? "更新于 " + new Date(q.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "未获取";
 
     let bodyHtml = "";
     if (!q || (!q.fiveHour && !q.sevenDay && !q.lastContextTokens)) {
       bodyHtml =
-        '<div class="quota-empty">发送任意一条消息后，将自动捕获官方返回的 5 小时 / 7 天额度与重置倒计时（零额外请求）。</div>';
+        '<div class="quota-empty">' +
+        (state.isRefreshingQuota
+          ? "正在后台静默获取远程 Claude 额度..."
+          : "点击右上角刷新图标即可在后台静默获取实时 5 小时 / 7 天额度（0 Token，不弹终端）。") +
+        "</div>";
     } else {
       const renderBar = (label, win) => {
         if (!win) return "";
@@ -378,31 +395,71 @@ import { Marked, Renderer } from "marked";
     }
 
     quotaPopover.innerHTML =
-      '<div class="quota-head"><span class="quota-head-title">Claude 实时额度</span><span class="quota-head-time">更新于 ' + escapeHtml(updatedLabel) + "</span></div>" +
-      bodyHtml +
-      '<div class="quota-actions">' +
-      '<button class="quota-act-btn" id="quotaOpenTermBtn">终端查 /usage</button>' +
-      '<button class="quota-act-btn" id="quotaSyncRulesBtn">同步 CLAUDE.md</button>' +
-      "</div>";
+      '<div class="quota-head">' +
+      '<span class="quota-head-title">Claude 实时额度</span>' +
+      '<span class="quota-head-right">' +
+      '<span class="quota-head-time">' + escapeHtml(updatedLabel) + "</span>" +
+      '<button class="quota-refresh-btn ' + (state.isRefreshingQuota ? "spinning" : "") + '" id="quotaRefreshBtn" title="后台静默刷新额度 (0 Token)">' + ICON_REFRESH + "</button>" +
+      "</span></div>" +
+      bodyHtml;
 
-    const openTermBtn = document.getElementById("quotaOpenTermBtn");
-    if (openTermBtn) {
-      openTermBtn.addEventListener("click", () => {
-        closePopovers();
-        vscode.postMessage({ type: "openTerminal" });
+    const refreshBtn = document.getElementById("quotaRefreshBtn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => {
+        vscode.postMessage({ type: "refreshQuota" });
       });
     }
-    const syncRulesBtn = document.getElementById("quotaSyncRulesBtn");
-    if (syncRulesBtn) {
-      syncRulesBtn.addEventListener("click", () => {
+  }
+
+  function renderSettingsPopover(state) {
+    const syncOn = Boolean(state.syncLocalRules);
+    settingsPopover.innerHTML =
+      '<div class="setting-row" id="toggleSyncRulesRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">自动同步本地 CLAUDE.md</span>' +
+      '<span class="setting-row-desc">连接远程时仅在内容有变化时同步</span>' +
+      "</div>" +
+      '<span class="switch ' + (syncOn ? "on" : "") + '"></span>' +
+      "</div>" +
+      '<div class="setting-row" id="syncRulesNowRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">立即同步本地 CLAUDE.md</span>' +
+      '<span class="setting-row-desc">无损合并到远程 ~/.claude/CLAUDE.md</span>' +
+      "</div>" +
+      "</div>" +
+      '<div class="popover-divider"></div>' +
+      '<div class="setting-row" id="openFullSettingsRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">打开全部插件设置...</span>' +
+      '<span class="setting-row-desc">SSH、端口、规则文件路径等</span>' +
+      "</div>" +
+      "</div>";
+
+    const toggleRow = document.getElementById("toggleSyncRulesRow");
+    if (toggleRow) {
+      toggleRow.addEventListener("click", () => {
+        vscode.postMessage({ type: "toggleSyncLocalRules", enabled: !syncOn });
+      });
+    }
+    const syncNowRow = document.getElementById("syncRulesNowRow");
+    if (syncNowRow) {
+      syncNowRow.addEventListener("click", () => {
         closePopovers();
         vscode.postMessage({ type: "syncRules" });
+      });
+    }
+    const openFullRow = document.getElementById("openFullSettingsRow");
+    if (openFullRow) {
+      openFullRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openSettings" });
       });
     }
   }
 
   function renderPopovers(state) {
     renderQuotaPopover(state);
+    renderSettingsPopover(state);
     // 1. 历史会话
     const listHtml = (state.sessions || [])
       .map((s) => {

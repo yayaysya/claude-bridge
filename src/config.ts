@@ -117,6 +117,12 @@ export async function updateEffort(effort: EffortLevel): Promise<void> {
   await cfg.update("effort", effort, vscode.ConfigurationTarget.Global);
 }
 
+/** 更新全局自动同步本地 CLAUDE.md 开关 */
+export async function updateSyncLocalRules(enabled: boolean): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("ec2Claude");
+  await cfg.update("syncLocalRules", enabled, vscode.ConfigurationTarget.Global);
+}
+
 /**
  * 构造基础 SSH 参数：
  * 关键隔离点：显式禁止透传本地 LANG / LC_* 环境变量，不向远程暴露本地语言特征。

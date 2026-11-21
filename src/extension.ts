@@ -17,7 +17,7 @@ export function activate(context: vscode.ExtensionContext): void {
   terminalManager = new TerminalManager(output);
   const claudeClient = new ClaudeClient(output);
   const sessionStore = new SessionStore(context.globalState);
-  const rulesSync = new RulesSyncManager(output);
+  const rulesSync = new RulesSyncManager(output, context.globalState);
   const chatProvider = new ChatViewProvider(
     context.extensionUri,
     bridgeManager,
@@ -79,8 +79,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     bridgeManager.onDidChangeState((st) => {
       updateStatusBar(st);
-      // 首次连上或重连恢复时，若开启了本地规则同步则静默合并同步
+      // 首次连上或重连恢复时：静默刷新额度，若开启本地规则同步则按指纹去重同步
       if (st.status === "connected" && prevBridgeStatus !== "connected") {
+        void chatProvider.refreshQuota();
         const cfg = getBridgeConfig();
         if (cfg.syncLocalRules) {
           void rulesSync.sync(cfg, { force: false });

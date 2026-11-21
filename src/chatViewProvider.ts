@@ -11,6 +11,7 @@ import {
   updateEffort,
   updateModel,
   updatePermissionMode,
+  updateSyncLocalRules,
 } from "./config";
 import {
   ChatMessage,
@@ -38,6 +39,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private activeRun: ClaudeRunHandle | undefined;
   private gitBadge: GitBadgeInfo | undefined;
   private lastGitRefreshAt = 0;
+  private isRefreshingQuota = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -104,6 +106,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.syncState();
   }
 
+  /** 后台静默刷新远程 Claude 实时额度（0 Token，不弹终端） */
+  public async refreshQuota(): Promise<void> {
+    if (this.isRefreshingQuota) {
+      return;
+    }
+    this.isRefreshingQuota = true;
+    this.syncState();
+    try {
+      const partial = await this.claude.fetchQuota(getBridgeConfig());
+      if (partial) {
+        const prev = this.sessions.getQuota();
+        const merged: QuotaSnapshot = {
+          ...prev,
+          ...partial,
+          updatedAt: partial.updatedAt ?? Date.now(),
+        };
+        this.sessions.saveQuota(merged);
+      }
+    } finally {
+      this.isRefreshingQuota = false;
+      this.syncState();
+    }
+  }
+
   /** 将编辑器当前文件或选中代码添加到输入框上下文标签，并唤起侧边栏 */
   public async addContextAttachment(att: ContextAttachment): Promise<void> {
     const exists = this.pendingAttachments.some(
@@ -167,6 +193,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         effort: cfg.effort,
         syncLocalRules: cfg.syncLocalRules,
         quota: this.sessions.getQuota() ?? null,
+        isRefreshingQuota: this.isRefreshingQuota,
         workspacePath: getActiveWorkspacePath() ?? "",
         gitBadge: this.gitBadge ?? null,
         activeEditor,
@@ -208,6 +235,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         } else {
           vscode.window.showWarningMessage(res.message);
         }
+        break;
+      }
+
+      case "toggleSyncLocalRules": {
+        const nextEnabled = Boolean(msg.enabled);
+        await updateSyncLocalRules(nextEnabled);
+        this.syncState();
+        if (nextEnabled && this.bridge.getState().status === "connected") {
+          const res = await this.rulesSync.sync(getBridgeConfig(), {
+            force: false,
+          });
+          if (res.ok && !res.skippedUnchanged) {
+            vscode.window.showInformationMessage(res.message);
+          }
+        }
+        break;
+      }
+
+      case "refreshQuota": {
+        await this.refreshQuota();
         break;
       }
 
@@ -380,7 +427,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let contextBlock: string | undefined;
     if (cfg.autoAttachWorkspaceContext) {
       const snapshot = await collectWorkspaceSnapshot();
-      contextBlock = formatSnapshotForPrompt(snapshot);
+      const formatted = formatSnapshotForPrompt(snapshot);
+      const contextHash = crypto
+        .createHash("sha256")
+        .update(formatted)
+        .digest("hex");
+
+      // 同一会话内：仅在首轮或工作区/Git 现场发生变化时附带，无变化则跳过以省 Token
+      if (!session.claudeSessionId || session.lastContextHash !== contextHash) {
+        contextBlock = formatted;
+        session.lastContextHash = contextHash;
+      }
+
       // 顺手同步最新 Git 状态到界面徽标
       if (snapshot.primaryWorkspace && snapshot.workspaceName) {
         this.gitBadge = {
@@ -542,6 +600,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     <div id="historyPopover" class="popover history-popover"></div>
     <div id="quotaPopover" class="popover quota-popover"></div>
+    <div id="settingsPopover" class="popover settings-popover"></div>
 
     <main id="messages" class="messages"></main>
 

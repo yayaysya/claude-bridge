@@ -45,6 +45,8 @@ export interface ChatSession {
   id: string;
   title: string;
   claudeSessionId?: string;
+  /** 最近一次已注入给该会话的工作区快照指纹，用于无变化时去重 */
+  lastContextHash?: string;
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
