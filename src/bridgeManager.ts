@@ -272,9 +272,10 @@ export class BridgeManager implements vscode.Disposable {
     return false;
   }
 
-  /** 确保 EC2 上的反向隧道打通且可访问本地 DevSpace */
+  /** 确保 EC2 上的反向隧道打通且可访问本地 DevSpace（遇僵尸端口占用自动清理并立即重试） */
   private async ensureTunnel(
-    cfg: BridgeConfig
+    cfg: BridgeConfig,
+    allowZombieCleanup = true
   ): Promise<{ ok: boolean; reason: string }> {
     const initialProbe = await this.probeRemoteMcp(cfg, 18_000);
     if (initialProbe.ok) {
@@ -347,6 +348,21 @@ export class BridgeManager implements vscode.Disposable {
     for (let i = 0; i < 5; i++) {
       await this.delay(i === 0 ? 1800 : 2000);
       if (child.exitCode !== null) {
+        // 已确认远程端口无健康响应且绑定被拒：自动清理远程僵尸 -N 隧道后立即重试一次
+        if (
+          allowZombieCleanup &&
+          this.isRemotePortConflict(this.lastTunnelStderr)
+        ) {
+          this.logger.warn(
+            "Tunnel",
+            `检测到远程端口 ${cfg.remotePort} 被旧僵尸连接占用，正在自动清理后立即重连...`
+          );
+          const cleaned = await this.cleanupRemoteStaleTunnel(cfg);
+          if (cleaned) {
+            await this.delay(800);
+            return this.ensureTunnel(cfg, false);
+          }
+        }
         return {
           ok: false,
           reason: this.classifyDisconnectReason(
@@ -376,6 +392,47 @@ export class BridgeManager implements vscode.Disposable {
       null
     );
     return { ok: false, reason: detailReason };
+  }
+
+  private isRemotePortConflict(stderrText: string): boolean {
+    const lower = (stderrText || "").toLowerCase();
+    return (
+      lower.includes("remote port forwarding failed") ||
+      lower.includes("cannot listen to port")
+    );
+  }
+
+  /**
+   * 仅在确认端口无响应且绑定冲突时，清理远程残留的无终端 `-N` 僵尸转发进程
+   * （只匹配 `sshd-session: <user>` / `sshd: <user>`，不影响交互终端与当前命令会话）
+   */
+  private cleanupRemoteStaleTunnel(cfg: BridgeConfig): Promise<boolean> {
+    return new Promise((resolve) => {
+      const remoteCmd =
+        'pids=$(ps -eo pid=,user=,args= | awk -v u="$USER" -v pp="$PPID" \'$2==u && $1!=pp && ($3=="sshd-session:" || $3=="sshd:") && $4==u && NF==4 {print $1}\'); ' +
+        'if [ -n "$pids" ]; then echo "$pids" | xargs -r kill 2>/dev/null || true; echo "KILLED:$pids"; else echo "NONE"; fi';
+      const args = [
+        ...buildBaseSshArgs(cfg, {
+          batchMode: true,
+          proxy: this.activeProxy ?? null,
+        }),
+        `${cfg.sshUser}@${cfg.sshHost}`,
+        remoteCmd,
+      ];
+      execFile("ssh", args, { timeout: 15_000 }, (err, stdout, stderr) => {
+        if (err) {
+          this.logger.warn(
+            "Tunnel",
+            `自动清理远程僵尸连接失败: ${(stderr ?? "").trim() || err.message}`
+          );
+          resolve(false);
+          return;
+        }
+        const out = (stdout ?? "").trim();
+        this.logger.info("Tunnel", `远程僵尸连接清理结果: ${out}`);
+        resolve(out.startsWith("KILLED:"));
+      });
+    });
   }
 
   /**
