@@ -51,7 +51,7 @@ const TOOL_LABEL_MAP: Record<string, string> = {
 export class ClaudeClient {
   private activeChild: ChildProcess | undefined;
 
-  constructor(private readonly output: vscode.OutputChannel) {}
+  constructor(private readonly output: { appendLine(value: string): void }) {}
 
   public isRunning(): boolean {
     return Boolean(this.activeChild);

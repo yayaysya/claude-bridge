@@ -2,7 +2,7 @@
   "name": "ec2-claude-vscode",
   "displayName": "EC2 Claude Bridge",
   "description": "Connect local projects via DevSpace MCP and SSH reverse tunnel to a remote Claude Code instance, with a native-style Agent chat sidebar and terminal.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.90.0"
@@ -74,6 +74,10 @@
         "title": "EC2 Claude: 查看连接日志"
       },
       {
+        "command": "ec2Claude.openLogFile",
+        "title": "EC2 Claude: 打开诊断日志文件 (bridge.log)"
+      },
+      {
         "command": "ec2Claude.openSettings",
         "title": "EC2 Claude: 打开插件设置"
       },
@@ -119,6 +123,11 @@
           "type": "string",
           "default": "",
           "description": "本地 SSH 私钥 (.pem) 绝对路径（例如 ~/.ssh/my-ec2.pem）"
+        },
+        "ec2Claude.sshProxy": {
+          "type": "string",
+          "default": "auto",
+          "description": "SSH 连接代理策略：auto（自动跟随环境变量 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY，无代理则直连）、off（强制直连），或手动填代理地址如 http://127.0.0.1:7890 / socks5://127.0.0.1:7891"
         },
         "ec2Claude.localPort": {
           "type": "number",

@@ -280,6 +280,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
         break;
 
+      case "openLogFile":
+        await vscode.commands.executeCommand("ec2Claude.openLogFile");
+        break;
+
       case "setPermissionMode": {
         const mode = String(msg.mode ?? "bypassPermissions") as PermissionMode;
         await updatePermissionMode(mode);

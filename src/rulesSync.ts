@@ -34,7 +34,7 @@ const RULES_HASH_STORAGE_KEY = "ec2Claude.lastSyncedRulesHash.v1";
  */
 export class RulesSyncManager {
   constructor(
-    private readonly output: vscode.OutputChannel,
+    private readonly output: { appendLine(value: string): void },
     private readonly state: vscode.Memento
   ) {}
 

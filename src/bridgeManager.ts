@@ -7,8 +7,11 @@ import {
   BridgeConfig,
   buildBaseSshArgs,
   getBridgeConfig,
+  ResolvedSshProxy,
   resolveDevspaceBinary,
+  resolveSshProxy,
 } from "./config";
+import { BridgeLogger } from "./logger";
 
 export type ConnectionStatus =
   | "disconnected"
@@ -25,11 +28,19 @@ export interface BridgeState {
   lastConnectedAt?: number;
   managedDevspace: boolean;
   managedTunnel: boolean;
+  activeProxy?: string;
+}
+
+interface ProbeResult {
+  ok: boolean;
+  httpCode: string;
+  elapsedMs: number;
+  errorText: string;
 }
 
 /**
  * 本地 DevSpace MCP + SSH 反向隧道连接管家
- * 负责一键启动、复用已有健康进程、断线自动重连、休眠唤醒自愈。
+ * 负责一键启动、动态代理检测、防误杀健康检查、断线原因诊断日志与自动重连。
  */
 export class BridgeManager implements vscode.Disposable {
   private devspaceProc: ChildProcess | undefined;
@@ -37,8 +48,11 @@ export class BridgeManager implements vscode.Disposable {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private healthTimer: NodeJS.Timeout | undefined;
   private reconnectAttempts = 0;
+  private consecutiveHealthFailures = 0;
   private manualDisconnected = false;
   private connectingPromise: Promise<boolean> | undefined;
+  private lastTunnelStderr = "";
+  private activeProxy: ResolvedSshProxy | undefined;
 
   private state: BridgeState = {
     status: "disconnected",
@@ -52,7 +66,7 @@ export class BridgeManager implements vscode.Disposable {
   private readonly stateEmitter = new vscode.EventEmitter<BridgeState>();
   public readonly onDidChangeState = this.stateEmitter.event;
 
-  constructor(private readonly output: vscode.OutputChannel) {}
+  constructor(private readonly logger: BridgeLogger) {}
 
   public getState(): BridgeState {
     return { ...this.state };
@@ -68,6 +82,7 @@ export class BridgeManager implements vscode.Disposable {
     this.clearReconnectTimer();
 
     if (forceReconnect) {
+      this.logger.info("Bridge", "触发强制重连，正在重置当前管理的 SSH 隧道");
       this.stopManagedTunnel();
     }
 
@@ -92,8 +107,9 @@ export class BridgeManager implements vscode.Disposable {
       detail: "已手动断开",
       managedDevspace: false,
       managedTunnel: false,
+      activeProxy: undefined,
     });
-    this.log("已手动断开连接");
+    this.logger.info("Bridge", "已手动断开连接");
   }
 
   private async doConnect(): Promise<boolean> {
@@ -101,12 +117,12 @@ export class BridgeManager implements vscode.Disposable {
     this.setState({
       ...this.state,
       status: "connecting",
-      detail: "正在检查本地 DevSpace 与 SSH 隧道...",
+      detail: "正在检查本地 DevSpace、代理与 SSH 隧道...",
     });
 
     // 1. 基础配置与密钥检查
     if (!cfg.sshHost || !cfg.sshUser) {
-      this.fail("SSH 主机或用户名未配置");
+      this.fail("SSH 主机或用户名未配置（请在插件设置中填写 ec2Claude.sshHost）");
       return false;
     }
     if (!fs.existsSync(cfg.sshKeyPath)) {
@@ -119,13 +135,43 @@ export class BridgeManager implements vscode.Disposable {
       const stat = fs.statSync(cfg.sshKeyPath);
       if ((stat.mode & 0o077) !== 0) {
         fs.chmodSync(cfg.sshKeyPath, 0o600);
-        this.log(`已自动修正密钥权限为 600: ${cfg.sshKeyPath}`);
+        this.logger.info("Bridge", `已自动修正密钥权限为 600: ${cfg.sshKeyPath}`);
       }
     } catch (err) {
-      this.log(`检查密钥权限失败: ${String(err)}`);
+      this.logger.warn("Bridge", `检查密钥权限失败: ${String(err)}`);
     }
 
-    // 2. 启动或复用本地 DevSpace MCP
+    // 2. 动态检测代理是否存活（auto 模式下若代理端口未开启则自动回退直连，不写死）
+    const candidateProxy = resolveSshProxy(cfg);
+    if (candidateProxy) {
+      const proxyAlive = await this.isTcpListening(
+        candidateProxy.host,
+        candidateProxy.port,
+        1200
+      );
+      if (proxyAlive) {
+        this.activeProxy = candidateProxy;
+        this.logger.info("Proxy", `检测到可用代理，SSH 将经由 ${candidateProxy.display} 连接`);
+      } else if ((cfg.sshProxy || "auto").toLowerCase() === "auto") {
+        this.activeProxy = undefined;
+        this.logger.warn(
+          "Proxy",
+          `环境变量代理 ${candidateProxy.display} 当前未监听，自动回退为直连`
+        );
+      } else {
+        this.activeProxy = candidateProxy;
+        this.fail(
+          `指定的 SSH 代理不可达 (${candidateProxy.display})，请检查 VPN/代理是否启动或端口是否变更`
+        );
+        this.scheduleReconnectIfNeeded(cfg);
+        return false;
+      }
+    } else {
+      this.activeProxy = undefined;
+      this.logger.info("Proxy", "未配置代理或已设为直连，SSH 将直接连接远程主机");
+    }
+
+    // 3. 启动或复用本地 DevSpace MCP
     const devspaceOk = await this.ensureDevspace(cfg);
     if (!devspaceOk) {
       this.fail(`本地 DevSpace 启动失败（端口 ${cfg.localPort}）`);
@@ -133,34 +179,45 @@ export class BridgeManager implements vscode.Disposable {
       return false;
     }
 
-    // 3. 建立或复用 SSH 反向隧道
-    const tunnelOk = await this.ensureTunnel(cfg);
-    if (!tunnelOk) {
-      this.fail(`SSH 反向隧道建立失败（${cfg.sshUser}@${cfg.sshHost}）`);
+    // 4. 建立或复用 SSH 反向隧道
+    const tunnelResult = await this.ensureTunnel(cfg);
+    if (!tunnelResult.ok) {
+      this.fail(tunnelResult.reason);
       this.scheduleReconnectIfNeeded(cfg);
       return false;
     }
 
     this.reconnectAttempts = 0;
+    this.consecutiveHealthFailures = 0;
+    const proxySuffix = this.activeProxy
+      ? ` · 经由代理 ${this.activeProxy.host}:${this.activeProxy.port}`
+      : " · 直连";
     this.setState({
       status: "connected",
       devspaceReady: true,
       tunnelReady: true,
-      detail: `已连通 ${cfg.sshHost} (127.0.0.1:${cfg.remotePort})`,
+      detail: `已连通 ${cfg.sshHost} (127.0.0.1:${cfg.remotePort}${proxySuffix})`,
       lastConnectedAt: Date.now(),
       managedDevspace: Boolean(this.devspaceProc),
       managedTunnel: Boolean(this.tunnelProc),
+      activeProxy: this.activeProxy?.display,
     });
-    this.log(`连接就绪：本地 :${cfg.localPort} <-> EC2(${cfg.sshHost}) :${cfg.remotePort}`);
+    this.logger.info(
+      "Bridge",
+      `连接就绪：本地 :${cfg.localPort} <-> ${cfg.sshHost}:${cfg.remotePort}${proxySuffix}`
+    );
     this.startHealthCheck();
     return true;
   }
 
   /** 确保本地 DevSpace MCP 正常监听 */
   private async ensureDevspace(cfg: BridgeConfig): Promise<boolean> {
-    const alreadyListening = await this.isLocalPortListening(cfg.localPort);
+    const alreadyListening = await this.isTcpListening("127.0.0.1", cfg.localPort);
     if (alreadyListening) {
-      this.log(`检测到本地端口 ${cfg.localPort} 已有 DevSpace 监听，直接复用`);
+      this.logger.info(
+        "DevSpace",
+        `检测到本地端口 ${cfg.localPort} 已有 DevSpace 监听，直接复用`
+      );
       return true;
     }
 
@@ -171,7 +228,7 @@ export class BridgeManager implements vscode.Disposable {
       env.PATH = `${binDir}:${env.PATH ?? ""}`;
     }
 
-    this.log(`正在启动本地 DevSpace: ${binPath} serve`);
+    this.logger.info("DevSpace", `正在启动本地 DevSpace: ${binPath} serve`);
     const child = spawn(binPath, ["serve"], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -181,33 +238,32 @@ export class BridgeManager implements vscode.Disposable {
     child.stdout?.on("data", (buf: Buffer) => {
       const line = buf.toString("utf8").trim();
       if (line) {
-        this.log(`[DevSpace] ${line}`);
+        this.logger.info("DevSpace", line);
       }
     });
     child.stderr?.on("data", (buf: Buffer) => {
       const line = buf.toString("utf8").trim();
       if (line) {
-        this.log(`[DevSpace stderr] ${line}`);
+        this.logger.warn("DevSpace", line);
       }
     });
     child.on("exit", (code, signal) => {
-      this.log(`[DevSpace] 进程退出 code=${code} signal=${signal}`);
+      this.logger.warn("DevSpace", `进程退出 code=${code} signal=${signal}`);
       if (this.devspaceProc === child) {
         this.devspaceProc = undefined;
       }
       if (!this.manualDisconnected && this.state.status === "connected") {
         const latest = getBridgeConfig();
-        this.fail("本地 DevSpace 意外退出，准备重连...");
+        this.fail(`本地 DevSpace 意外退出 (code=${code})，正在自动重连...`);
         this.scheduleReconnectIfNeeded(latest);
       }
     });
 
-    // 轮询等待最多 12 秒
     for (let i = 0; i < 24; i++) {
       if (child.exitCode !== null) {
         return false;
       }
-      const ready = await this.isLocalPortListening(cfg.localPort);
+      const ready = await this.isTcpListening("127.0.0.1", cfg.localPort);
       if (ready) {
         return true;
       }
@@ -217,19 +273,30 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   /** 确保 EC2 上的反向隧道打通且可访问本地 DevSpace */
-  private async ensureTunnel(cfg: BridgeConfig): Promise<boolean> {
-    // 若已有健康隧道（如其他 VS Code 窗口或后台已拉起），直接复用
-    const alreadyReachable = await this.probeRemoteMcp(cfg);
-    if (alreadyReachable) {
-      this.log(`检测到 EC2 127.0.0.1:${cfg.remotePort} 已连通 DevSpace，直接复用`);
-      return true;
+  private async ensureTunnel(
+    cfg: BridgeConfig
+  ): Promise<{ ok: boolean; reason: string }> {
+    const initialProbe = await this.probeRemoteMcp(cfg, 18_000);
+    if (initialProbe.ok) {
+      this.logger.info(
+        "Tunnel",
+        `检测到远程 127.0.0.1:${cfg.remotePort} 已连通 (HTTP ${initialProbe.httpCode}, ${initialProbe.elapsedMs}ms)，直接复用`
+      );
+      return { ok: true, reason: "" };
     }
+    this.logger.info(
+      "Tunnel",
+      `初始远程探测未连通 (${initialProbe.errorText || `HTTP ${initialProbe.httpCode}`}, ${initialProbe.elapsedMs}ms)，准备拉起新隧道`
+    );
 
-    // 清理可能失效的旧子进程
     this.stopManagedTunnel();
+    this.lastTunnelStderr = "";
 
     const sshArgs = [
-      ...buildBaseSshArgs(cfg, { batchMode: true }),
+      ...buildBaseSshArgs(cfg, {
+        batchMode: true,
+        proxy: this.activeProxy ?? null,
+      }),
       "-N",
       "-o",
       "ExitOnForwardFailure=yes",
@@ -238,8 +305,9 @@ export class BridgeManager implements vscode.Disposable {
       `${cfg.sshUser}@${cfg.sshHost}`,
     ];
 
-    this.log(
-      `正在建立 SSH 反向隧道: ${cfg.sshUser}@${cfg.sshHost} (R 127.0.0.1:${cfg.remotePort} -> 127.0.0.1:${cfg.localPort})`
+    this.logger.info(
+      "Tunnel",
+      `启动 SSH 反向隧道: ${cfg.sshUser}@${cfg.sshHost} (R 127.0.0.1:${cfg.remotePort} -> 127.0.0.1:${cfg.localPort}${this.activeProxy ? `, via ${this.activeProxy.display}` : ", direct"})`
     );
     const child = spawn("ssh", sshArgs, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -249,37 +317,71 @@ export class BridgeManager implements vscode.Disposable {
     child.stderr?.on("data", (buf: Buffer) => {
       const line = buf.toString("utf8").trim();
       if (line) {
-        this.log(`[SSH Tunnel] ${line}`);
+        this.lastTunnelStderr = line;
+        this.logger.warn("SSH Tunnel", line);
       }
     });
 
     child.on("exit", (code, signal) => {
-      this.log(`[SSH Tunnel] 进程退出 code=${code} signal=${signal}`);
+      const reason = this.classifyDisconnectReason(
+        this.lastTunnelStderr,
+        code,
+        signal
+      );
+      this.logger.warn(
+        "SSH Tunnel",
+        `隧道进程退出 code=${code} signal=${signal} | 诊断=${reason}`
+      );
       if (this.tunnelProc === child) {
         this.tunnelProc = undefined;
       }
       if (!this.manualDisconnected && this.state.status === "connected") {
         const latest = getBridgeConfig();
-        this.fail("SSH 隧道已断开，正在尝试自动重连...");
+        this.fail(`${reason}，正在自动重连...`);
         this.scheduleReconnectIfNeeded(latest);
       }
     });
 
-    // 等待远程端口真正可用（最多约 12 秒）
-    for (let i = 0; i < 6; i++) {
-      await this.delay(1500);
+    // 等待远程端口真正可用（最多 5 次探测，避免误判慢握手）
+    let lastProbe: ProbeResult | undefined;
+    for (let i = 0; i < 5; i++) {
+      await this.delay(i === 0 ? 1800 : 2000);
       if (child.exitCode !== null) {
-        return false;
+        return {
+          ok: false,
+          reason: this.classifyDisconnectReason(
+            this.lastTunnelStderr,
+            child.exitCode,
+            null
+          ),
+        };
       }
-      const reachable = await this.probeRemoteMcp(cfg);
-      if (reachable) {
-        return true;
+      lastProbe = await this.probeRemoteMcp(cfg, 18_000);
+      if (lastProbe.ok) {
+        this.logger.info(
+          "Tunnel",
+          `隧道验证成功 (HTTP ${lastProbe.httpCode}, ${lastProbe.elapsedMs}ms)`
+        );
+        return { ok: true, reason: "" };
       }
+      this.logger.warn(
+        "Tunnel",
+        `第 ${i + 1}/5 次隧道探测未就绪: ${lastProbe.errorText || `HTTP ${lastProbe.httpCode}`} (${lastProbe.elapsedMs}ms)`
+      );
     }
-    return false;
+
+    const detailReason = this.classifyDisconnectReason(
+      this.lastTunnelStderr || lastProbe?.errorText || "",
+      child.exitCode,
+      null
+    );
+    return { ok: false, reason: detailReason };
   }
 
-  /** 定时健康检查，处理电脑休眠唤醒或外部复用隧道断开的场景 */
+  /**
+   * 定时健康检查（60 秒周期，20 秒超时，连续失败 3 次才触发重连）：
+   * 避免跨洋网络单次短暂抖动误杀原本健康的 SSH 隧道。
+   */
   private startHealthCheck(): void {
     this.stopHealthCheck();
     this.healthTimer = setInterval(async () => {
@@ -287,23 +389,49 @@ export class BridgeManager implements vscode.Disposable {
         return;
       }
       const cfg = getBridgeConfig();
-      const localOk = await this.isLocalPortListening(cfg.localPort);
-      const remoteOk = localOk ? await this.probeRemoteMcp(cfg) : false;
-
-      if (!localOk || !remoteOk) {
-        this.log(
-          `[HealthCheck] 检测到链路异常 (local=${localOk}, remote=${remoteOk})，触发自动修复`
-        );
-        this.setState({
-          ...this.state,
-          status: "connecting",
-          devspaceReady: localOk,
-          tunnelReady: remoteOk,
-          detail: "检测到链路中断，正在自动重连...",
-        });
-        void this.connect(true);
+      const localOk = await this.isTcpListening("127.0.0.1", cfg.localPort);
+      if (!localOk) {
+        this.logger.error("HealthCheck", `本地 DevSpace 端口 ${cfg.localPort} 未监听，立即触发重连`);
+        this.triggerHealthReconnect("本地 DevSpace 停止响应，正在重连...");
+        return;
       }
-    }, 30_000);
+
+      const probe = await this.probeRemoteMcp(cfg, 20_000);
+      if (probe.ok) {
+        if (this.consecutiveHealthFailures > 0) {
+          this.logger.info(
+            "HealthCheck",
+            `链路恢复正常 (HTTP ${probe.httpCode}, ${probe.elapsedMs}ms)`
+          );
+        }
+        this.consecutiveHealthFailures = 0;
+        return;
+      }
+
+      this.consecutiveHealthFailures += 1;
+      const reason = this.classifyDisconnectReason(probe.errorText, null, null);
+      this.logger.warn(
+        "HealthCheck",
+        `远程探测失败 (${this.consecutiveHealthFailures}/3) | ${probe.errorText || `HTTP ${probe.httpCode}`} (${probe.elapsedMs}ms) | 诊断=${reason}`
+      );
+
+      // 连续失败达到 3 次，或插件托管的隧道进程已经退出，才判定真断联并重连
+      const tunnelGone = this.state.managedTunnel && !this.tunnelProc;
+      if (tunnelGone || this.consecutiveHealthFailures >= 3) {
+        this.consecutiveHealthFailures = 0;
+        this.triggerHealthReconnect(`${reason}，正在自动重连...`);
+      }
+    }, 60_000);
+  }
+
+  private triggerHealthReconnect(detail: string): void {
+    this.setState({
+      ...this.state,
+      status: "connecting",
+      tunnelReady: false,
+      detail,
+    });
+    void this.connect(true);
   }
 
   private stopHealthCheck(): void {
@@ -321,7 +449,10 @@ export class BridgeManager implements vscode.Disposable {
     this.clearReconnectTimer();
     const waitSeconds = Math.min(30, 3 * Math.pow(2, this.reconnectAttempts));
     this.reconnectAttempts += 1;
-    this.log(`将在 ${waitSeconds} 秒后自动重试连接（第 ${this.reconnectAttempts} 次）`);
+    this.logger.info(
+      "Bridge",
+      `将在 ${waitSeconds} 秒后自动重试连接（第 ${this.reconnectAttempts} 次）`
+    );
     this.reconnectTimer = setTimeout(() => {
       void this.connect(false);
     }, waitSeconds * 1000);
@@ -356,44 +487,126 @@ export class BridgeManager implements vscode.Disposable {
     }
   }
 
-  /** 探测本地 TCP 端口是否在监听 */
-  private isLocalPortListening(port: number): Promise<boolean> {
+  /** 探测指定 TCP 地址与端口是否在监听 */
+  private isTcpListening(
+    host: string,
+    port: number,
+    timeoutMs = 1200
+  ): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = net.createConnection({ host: "127.0.0.1", port });
+      const socket = net.createConnection({ host, port });
       const done = (ok: boolean) => {
         socket.removeAllListeners();
         socket.destroy();
         resolve(ok);
       };
-      socket.setTimeout(1200);
+      socket.setTimeout(timeoutMs);
       socket.once("connect", () => done(true));
       socket.once("timeout", () => done(false));
       socket.once("error", () => done(false));
     });
   }
 
-  /** 探测 EC2 本机回环端口是否能收到 DevSpace MCP 响应 */
-  private probeRemoteMcp(cfg: BridgeConfig): Promise<boolean> {
+  /** 探测 EC2 本机回环端口是否能收到 DevSpace MCP 响应，并记录真实错误原因 */
+  private probeRemoteMcp(
+    cfg: BridgeConfig,
+    timeoutMs = 18_000
+  ): Promise<ProbeResult> {
+    const startAt = Date.now();
     return new Promise((resolve) => {
       const args = [
-        ...buildBaseSshArgs(cfg, { batchMode: true }),
+        ...buildBaseSshArgs(cfg, {
+          batchMode: true,
+          proxy: this.activeProxy ?? null,
+        }),
         `${cfg.sshUser}@${cfg.sshHost}`,
-        `curl -sS -m 4 -o /dev/null -w "%{http_code}" http://127.0.0.1:${cfg.remotePort}/mcp || true`,
+        `curl -sS -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:${cfg.remotePort}/mcp || true`,
       ];
-      execFile("ssh", args, { timeout: 10_000 }, (err, stdout) => {
+      execFile("ssh", args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+        const elapsedMs = Date.now() - startAt;
+        const code = (stdout ?? "").trim();
         if (err) {
-          resolve(false);
+          const errDetail =
+            (stderr ?? "").trim() ||
+            (err.killed ? `探测超时 (>${timeoutMs}ms)` : err.message);
+          resolve({
+            ok: false,
+            httpCode: code,
+            elapsedMs,
+            errorText: errDetail,
+          });
           return;
         }
-        const code = stdout.trim();
-        // DevSpace 正常响应通常为 401（未带 token）、200 或 405
-        resolve(code !== "" && code !== "000");
+        const ok = code !== "" && code !== "000";
+        resolve({
+          ok,
+          httpCode: code,
+          elapsedMs,
+          errorText: ok
+            ? ""
+            : (stderr ?? "").trim() ||
+              `远程 127.0.0.1:${cfg.remotePort} 无响应 (HTTP ${code || "000"})`,
+        });
       });
     });
   }
 
+  /** 将底层 SSH/网络错误翻译成通俗可读的断线原因 */
+  private classifyDisconnectReason(
+    rawError: string,
+    exitCode: number | null,
+    signal: NodeJS.Signals | null
+  ): string {
+    const text = (rawError || "").toLowerCase();
+    if (
+      text.includes("proxy") ||
+      (text.includes("nc:") && text.includes("refused"))
+    ) {
+      return `本地代理不可用 (${this.activeProxy?.display ?? "auto"})，请检查 VPN/代理状态`;
+    }
+    if (
+      text.includes("remote port forwarding failed") ||
+      text.includes("cannot listen to port")
+    ) {
+      return "EC2 远程端口被旧连接占用（网络闪断残留）";
+    }
+    if (
+      text.includes("connection timed out") ||
+      text.includes("operation timed out") ||
+      text.includes("探测超时")
+    ) {
+      return this.activeProxy
+        ? `连接超时（经由代理 ${this.activeProxy.host}:${this.activeProxy.port} 连不上 EC2）`
+        : "直连 EC2 超时（如本地需走代理，请检查 VPN 或 ec2Claude.sshProxy 设置）";
+    }
+    if (text.includes("permission denied") || text.includes("bad permissions")) {
+      return "SSH 密钥认证失败，请检查私钥路径与权限";
+    }
+    if (
+      text.includes("connection reset") ||
+      text.includes("broken pipe") ||
+      text.includes("client_loop") ||
+      text.includes("kex_exchange_identification")
+    ) {
+      return "网络连接中断（可能是 VPN 切换节点或网络波动）";
+    }
+    if (text.includes("no route to host") || text.includes("network is unreachable")) {
+      return "本地网络不可达";
+    }
+    if (rawError.trim()) {
+      return rawError.trim().slice(0, 120);
+    }
+    if (signal) {
+      return `SSH 隧道被信号终止 (${signal})`;
+    }
+    if (exitCode !== null) {
+      return `SSH 隧道异常退出 (exit=${exitCode})`;
+    }
+    return "远程隧道暂时不可达";
+  }
+
   private fail(detail: string): void {
-    this.log(`[Error] ${detail}`);
+    this.logger.error("Bridge", detail);
     this.setState({
       status: "error",
       devspaceReady: Boolean(this.devspaceProc),
@@ -401,17 +614,13 @@ export class BridgeManager implements vscode.Disposable {
       detail,
       managedDevspace: Boolean(this.devspaceProc),
       managedTunnel: Boolean(this.tunnelProc),
+      activeProxy: this.activeProxy?.display,
     });
   }
 
   private setState(next: BridgeState): void {
     this.state = next;
     this.stateEmitter.fire(this.getState());
-  }
-
-  private log(message: string): void {
-    const time = new Date().toLocaleTimeString();
-    this.output.appendLine(`[${time}] ${message}`);
   }
 
   private delay(ms: number): Promise<void> {

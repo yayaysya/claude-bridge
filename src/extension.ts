@@ -7,17 +7,19 @@ import { getBridgeConfig } from "./config";
 import { ContextAttachment, SessionStore } from "./sessionStore";
 import { TerminalManager } from "./terminalManager";
 import { RulesSyncManager } from "./rulesSync";
+import { BridgeLogger } from "./logger";
 
 let bridgeManager: BridgeManager | undefined;
 let terminalManager: TerminalManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const output = vscode.window.createOutputChannel("EC2 Claude Bridge");
-  bridgeManager = new BridgeManager(output);
-  terminalManager = new TerminalManager(output);
-  const claudeClient = new ClaudeClient(output);
+  const outputChannel = vscode.window.createOutputChannel("EC2 Claude Bridge");
+  const logger = new BridgeLogger(outputChannel);
+  bridgeManager = new BridgeManager(logger);
+  terminalManager = new TerminalManager(logger);
+  const claudeClient = new ClaudeClient(logger);
   const sessionStore = new SessionStore(context.globalState);
-  const rulesSync = new RulesSyncManager(output, context.globalState);
+  const rulesSync = new RulesSyncManager(logger, context.globalState);
   const chatProvider = new ChatViewProvider(
     context.extensionUri,
     bridgeManager,
@@ -29,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // 注册左侧 Agent 聊天面板
   context.subscriptions.push(
-    output,
+    logger,
     bridgeManager,
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewId,
@@ -168,7 +170,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand("ec2Claude.showLogs", () => {
-      output.show(true);
+      logger.showChannel();
+    }),
+
+    vscode.commands.registerCommand("ec2Claude.openLogFile", async () => {
+      await logger.openLogFile();
     }),
 
     vscode.commands.registerCommand("ec2Claude.openSettings", async () => {
@@ -220,7 +226,12 @@ export function activate(context: vscode.ExtensionContext): void {
           action: "syncRules",
         },
         {
-          label: "$(output) 查看连接日志",
+          label: "$(file-text) 打开诊断日志文件 (bridge.log)",
+          description: "~/.ec2-claude-bridge/bridge.log（含断线原因与耗时）",
+          action: "openLogFile",
+        },
+        {
+          label: "$(output) 查看实时输出面板",
           action: "logs",
         },
         {
@@ -246,8 +257,10 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand("ec2Claude.disconnect");
       } else if (picked.action === "syncRules") {
         await vscode.commands.executeCommand("ec2Claude.syncRules");
+      } else if (picked.action === "openLogFile") {
+        await vscode.commands.executeCommand("ec2Claude.openLogFile");
       } else if (picked.action === "logs") {
-        output.show(true);
+        logger.showChannel();
       } else if (picked.action === "settings") {
         await vscode.commands.executeCommand("ec2Claude.openSettings");
       }

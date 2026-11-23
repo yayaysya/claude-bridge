@@ -19,6 +19,7 @@ export interface BridgeConfig {
   sshUser: string;
   sshPort: number;
   sshKeyPath: string;
+  sshProxy: string;
   localPort: number;
   remotePort: number;
   devspacePath: string;
@@ -76,6 +77,7 @@ export function getBridgeConfig(): BridgeConfig {
     sshUser: cfg.get<string>("sshUser", "ubuntu").trim(),
     sshPort: cfg.get<number>("sshPort", 22),
     sshKeyPath: expandHomePath(cfg.get<string>("sshKeyPath", "")),
+    sshProxy: cfg.get<string>("sshProxy", "auto").trim(),
     localPort: cfg.get<number>("localPort", 7676),
     remotePort: cfg.get<number>("remotePort", 7676),
     devspacePath: expandHomePath(cfg.get<string>("devspacePath", "")),
@@ -123,13 +125,81 @@ export async function updateSyncLocalRules(enabled: boolean): Promise<void> {
   await cfg.update("syncLocalRules", enabled, vscode.ConfigurationTarget.Global);
 }
 
+/** 解析后的 SSH 代理配置 */
+export interface ResolvedSshProxy {
+  protocol: "connect" | "5";
+  host: string;
+  port: number;
+  display: string;
+}
+
+/**
+ * 动态解析 SSH 代理设置（不写死任何端口）：
+ * - off / none：直连
+ * - auto：自动读取环境变量 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+ * - 手动地址：支持 http://host:port、socks5://host:port 或 host:port
+ */
+export function resolveSshProxy(cfg: BridgeConfig): ResolvedSshProxy | undefined {
+  const rawSetting = (cfg.sshProxy || "auto").trim();
+  const lower = rawSetting.toLowerCase();
+  if (lower === "off" || lower === "none" || lower === "direct") {
+    return undefined;
+  }
+
+  let candidate = rawSetting;
+  if (lower === "auto" || !candidate) {
+    candidate =
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy ||
+      process.env.ALL_PROXY ||
+      process.env.all_proxy ||
+      "";
+  }
+
+  candidate = candidate.trim();
+  if (!candidate) {
+    return undefined;
+  }
+
+  const normalized = /^[a-z0-9+.-]+:\/\//i.test(candidate)
+    ? candidate
+    : `http://${candidate}`;
+
+  try {
+    const parsed = new URL(normalized);
+    const host = parsed.hostname.trim();
+    const port = Number(parsed.port);
+    if (
+      !host ||
+      !/^[a-zA-Z0-9._:-]+$/.test(host) ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > 65535
+    ) {
+      return undefined;
+    }
+    const isSocks = parsed.protocol.toLowerCase().startsWith("socks");
+    return {
+      protocol: isSocks ? "5" : "connect",
+      host,
+      port,
+      display: `${isSocks ? "socks5" : "http"}://${host}:${port}`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 构造基础 SSH 参数：
- * 关键隔离点：显式禁止透传本地 LANG / LC_* 环境变量，不向远程暴露本地语言特征。
+ * 1. 显式禁止透传本地 LANG / LC_* 环境变量，不向远程暴露本地语言特征；
+ * 2. 按 sshProxy 设置动态挂载 nc ProxyCommand（支持 HTTP CONNECT 与 SOCKS5）。
  */
 export function buildBaseSshArgs(
   cfg: BridgeConfig,
-  options?: { batchMode?: boolean }
+  options?: { batchMode?: boolean; proxy?: ResolvedSshProxy | null }
 ): string[] {
   const args: string[] = [
     "-i",
@@ -141,7 +211,7 @@ export function buildBaseSshArgs(
     "-o",
     "ConnectTimeout=15",
     "-o",
-    "ServerAliveInterval=15",
+    "ServerAliveInterval=20",
     "-o",
     "ServerAliveCountMax=3",
     "-o",
@@ -149,6 +219,15 @@ export function buildBaseSshArgs(
     "-o",
     "SendEnv=-LC_*",
   ];
+
+  const effectiveProxy =
+    options?.proxy === undefined ? resolveSshProxy(cfg) : options.proxy;
+  if (effectiveProxy) {
+    args.push(
+      "-o",
+      `ProxyCommand=nc -X ${effectiveProxy.protocol} -x ${effectiveProxy.host}:${effectiveProxy.port} %h %p`
+    );
+  }
 
   if (options?.batchMode !== false) {
     args.push("-o", "BatchMode=yes");

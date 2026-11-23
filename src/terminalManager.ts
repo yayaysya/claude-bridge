@@ -13,7 +13,7 @@ import {
 export class TerminalManager {
   private terminal: vscode.Terminal | undefined;
 
-  constructor(private readonly output: vscode.OutputChannel) {
+  constructor(private readonly output: { appendLine(value: string): void }) {
     vscode.window.onDidCloseTerminal((closed) => {
       if (closed === this.terminal) {
         this.terminal = undefined;

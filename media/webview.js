@@ -541,10 +541,16 @@ import { Marked, Renderer } from "marked";
       "</div>" +
       "</div>" +
       '<div class="popover-divider"></div>' +
+      '<div class="setting-row" id="openLogFileRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">查看诊断日志 (bridge.log)</span>' +
+      '<span class="setting-row-desc">排查断线原因、网络耗时与代理状态</span>' +
+      "</div>" +
+      "</div>" +
       '<div class="setting-row" id="openFullSettingsRow">' +
       '<div class="setting-row-text">' +
       '<span class="setting-row-title">打开全部插件设置...</span>' +
-      '<span class="setting-row-desc">SSH、端口、规则文件路径等</span>' +
+      '<span class="setting-row-desc">SSH、代理策略、端口、规则路径等</span>' +
       "</div>" +
       "</div>";
 
@@ -559,6 +565,13 @@ import { Marked, Renderer } from "marked";
       syncNowRow.addEventListener("click", () => {
         closePopovers();
         vscode.postMessage({ type: "syncRules" });
+      });
+    }
+    const openLogRow = document.getElementById("openLogFileRow");
+    if (openLogRow) {
+      openLogRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openLogFile" });
       });
     }
     const openFullRow = document.getElementById("openFullSettingsRow");
