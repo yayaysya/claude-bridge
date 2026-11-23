@@ -1,6 +1,7 @@
 .vscode/**
 src/**
 media/webview.js
+media/settings.js
 node_modules/**
 esbuild.mjs
 tsconfig.json

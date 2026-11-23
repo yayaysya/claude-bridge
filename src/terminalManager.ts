@@ -60,7 +60,7 @@ export class TerminalManager {
     );
 
     this.terminal = vscode.window.createTerminal({
-      name: "EC2 Claude",
+      name: "ClaudeBridge",
       shellPath: "ssh",
       shellArgs: sshArgs,
     });

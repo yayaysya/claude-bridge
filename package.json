@@ -1,8 +1,8 @@
 {
-  "name": "ec2-claude-vscode",
-  "displayName": "EC2 Claude Bridge",
-  "description": "Connect local projects via DevSpace MCP and SSH reverse tunnel to a remote Claude Code instance, with a native-style Agent chat sidebar and terminal.",
-  "version": "0.3.7",
+  "name": "claude-bridge",
+  "displayName": "ClaudeBridge · 渡桥",
+  "description": "ClaudeBridge（渡桥）：通过本地 DevSpace MCP 与 SSH 反向隧道连接远程服务器上的 Claude Code，代码留在本地、AI 流量留在远程，提供侧边栏 Agent 面板、可视化设置中心与规则记忆管理。",
+  "version": "0.4.0",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.90.0"
@@ -22,134 +22,143 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "ec2-claude-sidebar",
-          "title": "EC2 Claude",
+          "id": "claude-bridge-sidebar",
+          "title": "ClaudeBridge · 渡桥",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "ec2-claude-sidebar": [
+      "claude-bridge-sidebar": [
         {
           "type": "webview",
-          "id": "ec2Claude.chatView",
-          "name": "Claude 对话"
+          "id": "claudeBridge.chatView",
+          "name": "渡桥 Claude"
         }
       ]
     },
     "commands": [
       {
-        "command": "ec2Claude.connect",
-        "title": "EC2 Claude: 一键连接 / 重连",
+        "command": "claudeBridge.connect",
+        "title": "ClaudeBridge: 一键连接 / 重连",
         "icon": "$(plug)"
       },
       {
-        "command": "ec2Claude.disconnect",
-        "title": "EC2 Claude: 断开连接",
+        "command": "claudeBridge.disconnect",
+        "title": "ClaudeBridge: 断开连接",
         "icon": "$(debug-disconnect)"
       },
       {
-        "command": "ec2Claude.openChat",
-        "title": "EC2 Claude: 打开聊天面板"
+        "command": "claudeBridge.openChat",
+        "title": "ClaudeBridge: 打开聊天面板"
       },
       {
-        "command": "ec2Claude.openTerminal",
-        "title": "EC2 Claude: 打开原生远程终端",
+        "command": "claudeBridge.openTerminal",
+        "title": "ClaudeBridge: 打开原生远程终端",
         "icon": "$(terminal)"
       },
       {
-        "command": "ec2Claude.sendSelection",
-        "title": "EC2 Claude: 将选中代码发送到聊天"
+        "command": "claudeBridge.sendSelection",
+        "title": "ClaudeBridge: 将选中代码发送到聊天"
       },
       {
-        "command": "ec2Claude.addCurrentFile",
-        "title": "EC2 Claude: 引用当前文件到聊天"
+        "command": "claudeBridge.addCurrentFile",
+        "title": "ClaudeBridge: 引用当前文件到聊天"
       },
       {
-        "command": "ec2Claude.showMenu",
-        "title": "EC2 Claude: 快捷操作菜单"
+        "command": "claudeBridge.showMenu",
+        "title": "ClaudeBridge: 快捷操作菜单"
       },
       {
-        "command": "ec2Claude.showLogs",
-        "title": "EC2 Claude: 查看连接日志"
+        "command": "claudeBridge.showLogs",
+        "title": "ClaudeBridge: 查看实时输出面板"
       },
       {
-        "command": "ec2Claude.openLogFile",
-        "title": "EC2 Claude: 打开诊断日志文件 (bridge.log)"
+        "command": "claudeBridge.openLogFile",
+        "title": "ClaudeBridge: 打开诊断日志文件 (bridge.log)"
       },
       {
-        "command": "ec2Claude.openSettings",
-        "title": "EC2 Claude: 打开插件设置"
+        "command": "claudeBridge.openSettings",
+        "title": "ClaudeBridge: 打开可视化设置中心",
+        "icon": "$(gear)"
       },
       {
-        "command": "ec2Claude.syncRules",
-        "title": "EC2 Claude: 同步本地 CLAUDE.md 规则到远程",
+        "command": "claudeBridge.openLocalRules",
+        "title": "ClaudeBridge: 打开本地 CLAUDE.md"
+      },
+      {
+        "command": "claudeBridge.syncRules",
+        "title": "ClaudeBridge: 同步本地 CLAUDE.md 到远程",
         "icon": "$(sync)"
+      },
+      {
+        "command": "claudeBridge.viewRemoteMemories",
+        "title": "ClaudeBridge: 拉取并查看远程 Claude 记忆"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "ec2Claude.sendSelection",
+          "command": "claudeBridge.sendSelection",
           "when": "editorHasSelection",
-          "group": "ec2Claude@1"
+          "group": "claudeBridge@1"
         },
         {
-          "command": "ec2Claude.addCurrentFile",
+          "command": "claudeBridge.addCurrentFile",
           "when": "editorTextFocus",
-          "group": "ec2Claude@2"
+          "group": "claudeBridge@2"
         }
       ]
     },
     "configuration": {
-      "title": "EC2 Claude Bridge",
+      "title": "ClaudeBridge · 渡桥",
       "properties": {
-        "ec2Claude.sshHost": {
+        "claudeBridge.sshHost": {
           "type": "string",
           "default": "",
           "description": "远程服务器公网 IP 或域名（例如 1.2.3.4）"
         },
-        "ec2Claude.sshUser": {
+        "claudeBridge.sshUser": {
           "type": "string",
           "default": "ubuntu",
           "description": "远程服务器 SSH 登录用户名"
         },
-        "ec2Claude.sshPort": {
+        "claudeBridge.sshPort": {
           "type": "number",
           "default": 22,
           "description": "远程服务器 SSH 端口"
         },
-        "ec2Claude.sshKeyPath": {
+        "claudeBridge.sshKeyPath": {
           "type": "string",
           "default": "",
-          "description": "本地 SSH 私钥 (.pem) 绝对路径（例如 ~/.ssh/my-ec2.pem）"
+          "description": "本地 SSH 私钥 (.pem) 绝对路径（例如 ~/.ssh/my-server.pem）"
         },
-        "ec2Claude.sshProxy": {
+        "claudeBridge.sshProxy": {
           "type": "string",
           "default": "auto",
-          "description": "SSH 连接代理策略：auto（自动跟随环境变量 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY，无代理则直连）、off（强制直连），或手动填代理地址如 http://127.0.0.1:7890 / socks5://127.0.0.1:7891"
+          "description": "SSH 代理策略：auto（自动跟随环境变量代理，无代理则直连）、off（强制直连），或手动填代理地址如 http://127.0.0.1:8080"
         },
-        "ec2Claude.localPort": {
+        "claudeBridge.localPort": {
           "type": "number",
           "default": 7676,
           "description": "本地 DevSpace MCP 监听端口"
         },
-        "ec2Claude.remotePort": {
+        "claudeBridge.remotePort": {
           "type": "number",
           "default": 7676,
           "description": "远程服务器映射的回环端口"
         },
-        "ec2Claude.devspacePath": {
+        "claudeBridge.devspacePath": {
           "type": "string",
           "default": "",
           "description": "本地 devspace 可执行文件路径（留空则自动从 PATH 与 nvm 查找）"
         },
-        "ec2Claude.remoteClaudePath": {
+        "claudeBridge.remoteClaudePath": {
           "type": "string",
           "default": "claude",
           "description": "远程服务器上 claude CLI 命令或绝对路径"
         },
-        "ec2Claude.permissionMode": {
+        "claudeBridge.permissionMode": {
           "type": "string",
           "enum": [
             "bypassPermissions",
@@ -166,12 +175,12 @@
           "default": "bypassPermissions",
           "description": "远程 Claude Code 权限模式"
         },
-        "ec2Claude.model": {
+        "claudeBridge.model": {
           "type": "string",
           "default": "",
-          "description": "指定 Claude 模型名称（如 claude-opus-5-5、claude-fable-5-2[1m]、claude-sonnet-5-5、claude-haiku-5-5，留空使用远程默认）"
+          "description": "指定 Claude 模型名称（留空跟随远程默认）"
         },
-        "ec2Claude.effort": {
+        "claudeBridge.effort": {
           "type": "string",
           "enum": [
             "",
@@ -181,43 +190,35 @@
             "xhigh",
             "max"
           ],
-          "enumDescriptions": [
-            "默认（跟随远程默认思考强度）",
-            "low：快速轻量思考",
-            "medium：日常均衡",
-            "high：深入推理分析",
-            "xhigh：复杂架构与疑难问题",
-            "max：最高思考深度"
-          ],
           "default": "",
           "description": "远程 Claude Code 思考强度 (--effort)"
         },
-        "ec2Claude.autoConnect": {
+        "claudeBridge.autoConnect": {
           "type": "boolean",
           "default": true,
           "description": "打开 VS Code 时自动启动本地 DevSpace 并建立 SSH 反向隧道"
         },
-        "ec2Claude.autoReconnect": {
+        "claudeBridge.autoReconnect": {
           "type": "boolean",
           "default": true,
           "description": "隧道意外断开或电脑休眠唤醒后自动重连"
         },
-        "ec2Claude.keepRunningOnClose": {
+        "claudeBridge.keepRunningOnClose": {
           "type": "boolean",
           "default": false,
           "description": "关闭 VS Code 窗口时是否保留由本插件启动的后台服务与隧道"
         },
-        "ec2Claude.autoAttachWorkspaceContext": {
+        "claudeBridge.autoAttachWorkspaceContext": {
           "type": "boolean",
           "default": true,
-          "description": "每次发消息时自动附带轻量工作区现场（当前项目路径、打开的文件与行号、Git 分支与改动清单）"
+          "description": "每次发消息时自动附带轻量工作区现场（工作区、活动文件与行号、Git 分支与改动，同一会话内无变化自动去重）"
         },
-        "ec2Claude.syncLocalRules": {
+        "claudeBridge.syncLocalRules": {
           "type": "boolean",
           "default": false,
-          "description": "连接远程成功时，自动将本地 CLAUDE.md 规则无损合并同步到远程 ~/.claude/CLAUDE.md（不影响远程原有路由规则）"
+          "description": "连接远程成功时，自动将本地 CLAUDE.md 无损合并同步到远程 ~/.claude/CLAUDE.md"
         },
-        "ec2Claude.localClaudeMdPaths": {
+        "claudeBridge.localClaudeMdPaths": {
           "type": "array",
           "items": {
             "type": "string"
@@ -225,7 +226,7 @@
           "default": [
             "~/.claude/CLAUDE.md"
           ],
-          "description": "需要同步到远程的本地规则文件路径列表（按顺序合并，自动跳过不存在的文件）"
+          "description": "需要同步到远程的本地规则文件路径列表"
         }
       }
     }

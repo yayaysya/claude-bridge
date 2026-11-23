@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-const LOG_DIR = path.join(os.homedir(), ".ec2-claude-bridge");
+const LOG_DIR = path.join(os.homedir(), ".claude-bridge");
 const LOG_FILE = path.join(LOG_DIR, "bridge.log");
 const MAX_LOG_BYTES = 1024 * 1024; // 1MB 自动滚动，避免长期占用磁盘
 

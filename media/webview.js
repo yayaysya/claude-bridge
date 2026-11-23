@@ -3,7 +3,9 @@ import { Marked, Renderer } from "marked";
 (function () {
   const vscode = acquireVsCodeApi();
   let currentState = null;
-  let openPopover = null; // "history" | "perm" | "model" | null
+  let openPopover = null; // "history" | "quota" | "settings" | "perm" | "model" | null
+  let lastLoadedSessionId = null;
+  let draftSaveTimer = null;
 
   function escapeHtml(str) {
     return String(str ?? "")
@@ -306,6 +308,7 @@ import { Marked, Renderer } from "marked";
   });
 
   document.getElementById("newChatBtn").addEventListener("click", () => {
+    flushDraftNow();
     closePopovers();
     vscode.postMessage({ type: "newSession" });
   });
@@ -339,6 +342,27 @@ import { Marked, Renderer } from "marked";
     sendBtn.title = "发送 (Enter)";
   }
 
+  function flushDraftNow() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    const sid = currentState && currentState.activeSession && currentState.activeSession.id;
+    if (!sid) return;
+    vscode.postMessage({
+      type: "saveDraft",
+      sessionId: sid,
+      text: promptInput.value,
+    });
+  }
+
+  function scheduleDraftSave() {
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      flushDraftNow();
+    }, 300);
+  }
+
   function triggerSend() {
     if (currentState && currentState.isRunning) {
       vscode.postMessage({ type: "stop" });
@@ -348,6 +372,10 @@ import { Marked, Renderer } from "marked";
     const hasAtt = currentState && currentState.attachments && currentState.attachments.length > 0;
     if (!text && !hasAtt) {
       return;
+    }
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
     }
     promptInput.value = "";
     autoResize();
@@ -365,6 +393,13 @@ import { Marked, Renderer } from "marked";
   promptInput.addEventListener("input", () => {
     autoResize();
     updateSendVisual();
+    scheduleDraftSave();
+  });
+  promptInput.addEventListener("blur", () => {
+    flushDraftNow();
+  });
+  window.addEventListener("pagehide", () => {
+    flushDraftNow();
   });
 
   function autoResize() {
@@ -527,18 +562,24 @@ import { Marked, Renderer } from "marked";
   function renderSettingsPopover(state) {
     const syncOn = Boolean(state.syncLocalRules);
     settingsPopover.innerHTML =
+      '<div class="setting-row" id="openLocalRulesRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">打开本地 CLAUDE.md</span>' +
+      '<span class="setting-row-desc">在编辑器中查看或修改个人规则</span>' +
+      "</div>" +
+      "</div>" +
+      '<div class="setting-row" id="viewRemoteMemRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">查看/备份远程 Claude 记忆</span>' +
+      '<span class="setting-row-desc">拉取远程自动记住的编码习惯</span>' +
+      "</div>" +
+      "</div>" +
       '<div class="setting-row" id="toggleSyncRulesRow">' +
       '<div class="setting-row-text">' +
       '<span class="setting-row-title">自动同步本地 CLAUDE.md</span>' +
-      '<span class="setting-row-desc">连接远程时仅在内容有变化时同步</span>' +
+      '<span class="setting-row-desc">连接远程时仅在有变化时无损同步</span>' +
       "</div>" +
       '<span class="switch ' + (syncOn ? "on" : "") + '"></span>' +
-      "</div>" +
-      '<div class="setting-row" id="syncRulesNowRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">立即同步本地 CLAUDE.md</span>' +
-      '<span class="setting-row-desc">无损合并到远程 ~/.claude/CLAUDE.md</span>' +
-      "</div>" +
       "</div>" +
       '<div class="popover-divider"></div>' +
       '<div class="setting-row" id="openLogFileRow">' +
@@ -549,22 +590,29 @@ import { Marked, Renderer } from "marked";
       "</div>" +
       '<div class="setting-row" id="openFullSettingsRow">' +
       '<div class="setting-row-text">' +
-      '<span class="setting-row-title">打开全部插件设置...</span>' +
-      '<span class="setting-row-desc">SSH、代理策略、端口、规则路径等</span>' +
+      '<span class="setting-row-title">打开可视化设置中心...</span>' +
+      '<span class="setting-row-desc">服务器、代理、测试连接、规则与记忆</span>' +
       "</div>" +
       "</div>";
 
+    const openLocalRow = document.getElementById("openLocalRulesRow");
+    if (openLocalRow) {
+      openLocalRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openLocalRules" });
+      });
+    }
+    const viewMemRow = document.getElementById("viewRemoteMemRow");
+    if (viewMemRow) {
+      viewMemRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "viewRemoteMemories" });
+      });
+    }
     const toggleRow = document.getElementById("toggleSyncRulesRow");
     if (toggleRow) {
       toggleRow.addEventListener("click", () => {
         vscode.postMessage({ type: "toggleSyncLocalRules", enabled: !syncOn });
-      });
-    }
-    const syncNowRow = document.getElementById("syncRulesNowRow");
-    if (syncNowRow) {
-      syncNowRow.addEventListener("click", () => {
-        closePopovers();
-        vscode.postMessage({ type: "syncRules" });
       });
     }
     const openLogRow = document.getElementById("openLogFileRow");
@@ -608,6 +656,7 @@ import { Marked, Renderer } from "marked";
     historyPopover.querySelectorAll("[data-sid]").forEach((el) => {
       el.addEventListener("click", (e) => {
         if (e.target && e.target.closest("[data-del]")) return;
+        flushDraftNow();
         vscode.postMessage({ type: "selectSession", sessionId: el.dataset.sid });
         closePopovers();
       });
@@ -704,13 +753,21 @@ import { Marked, Renderer } from "marked";
   }
 
   function render(state) {
+    // 首次加载或切换会话时，还原该会话持久化保存的草稿文本（防重载窗口丢失）
+    const activeSid = state.activeSession && state.activeSession.id;
+    if (activeSid && activeSid !== lastLoadedSessionId) {
+      lastLoadedSessionId = activeSid;
+      promptInput.value = (state.activeSession && state.activeSession.draftText) || "";
+      autoResize();
+    }
+
     // 顶栏会话名 & 状态
     sessionTitleText.textContent = (state.activeSession && state.activeSession.title) || "新对话";
 
     const st = state.bridge.status;
     statusDot.className = "dot " + st;
     if (st === "connected") {
-      statusText.textContent = "EC2 已连接";
+      statusText.textContent = "已连接";
     } else if (st === "connecting") {
       statusText.textContent = "连接中...";
     } else if (st === "error") {
@@ -829,8 +886,8 @@ import { Marked, Renderer } from "marked";
       messagesEl.innerHTML =
         '<div class="welcome">' +
         '<div class="welcome-logo">' + ICON_STAR + "</div>" +
-        "<h2>Claude Code · EC2</h2>" +
-        '<div class="welcome-sub">远程大脑运行于 AWS EC2，通过加密专线直接读写本地代码</div>' +
+        "<h2>ClaudeBridge · 渡桥</h2>" +
+        '<div class="welcome-sub">代码留在本地，AI 推理通过加密专线运行于远程服务器</div>' +
         '<div class="ws-badge"><span class="dot ' + escapeHtml(st) + '"></span>' + wsInner + "</div>" +
         '<div class="prompts-list">' +
         '<button class="prompt-card" data-quick="先帮我概览当前工作区的目录结构和核心模块职责。"><span class="prompt-card-icon">' + ICON_STAR_SM + "</span><span>概览当前项目结构与核心模块</span></button>" +

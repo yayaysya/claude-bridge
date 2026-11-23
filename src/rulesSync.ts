@@ -25,7 +25,8 @@ export interface RulesSyncResult {
   message: string;
 }
 
-const RULES_HASH_STORAGE_KEY = "ec2Claude.lastSyncedRulesHash.v1";
+const RULES_HASH_STORAGE_KEY = "claudeBridge.lastSyncedRulesHash.v1";
+const LEGACY_RULES_HASH_KEY = "ec2Claude.lastSyncedRulesHash.v1";
 
 /**
  * 本地 CLAUDE.md 规则同步器
@@ -100,7 +101,9 @@ export class RulesSyncManager {
       .update(`${cfg.sshHost}:${cfg.sshUser}\n${mergedBody}`)
       .digest("hex");
 
-    const savedHash = this.state.get<string>(RULES_HASH_STORAGE_KEY);
+    const savedHash =
+      this.state.get<string>(RULES_HASH_STORAGE_KEY) ??
+      this.state.get<string>(LEGACY_RULES_HASH_KEY);
     if (!options?.force && savedHash === hash) {
       return {
         ok: true,

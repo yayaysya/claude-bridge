@@ -30,13 +30,13 @@ import {
 } from "./workspaceContext";
 
 /**
- * 方案 B：侧边栏 Agent 聊天面板（对标 Claude Code 官方风格）
+ * 侧边栏 Agent 聊天面板（ClaudeBridge · 渡桥）
+ * 支持流式回复、草稿与附件持久化、工作区/Git 感知、实时额度与文件行号点击跳转。
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewId = "ec2Claude.chatView";
+  public static readonly viewId = "claudeBridge.chatView";
 
   private view: vscode.WebviewView | undefined;
-  private pendingAttachments: ContextAttachment[] = [];
   private activeRun: ClaudeRunHandle | undefined;
   private gitBadge: GitBadgeInfo | undefined;
   private lastGitRefreshAt = 0;
@@ -53,14 +53,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.bridge.onDidChangeState(() => {
       this.syncState();
     });
-    // 实时同步当前打开的文件与选区，方便输入框一键引用
     vscode.window.onDidChangeActiveTextEditor(() => {
       this.syncState();
     });
     vscode.window.onDidChangeTextEditorSelection(() => {
       this.syncState();
     });
-    // 保存文件或切换工作区时轻量刷新 Git 分支与改动数量
     vscode.workspace.onDidSaveTextDocument(() => {
       void this.refreshGitBadge(true);
     });
@@ -131,9 +129,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** 将编辑器当前文件或选中代码添加到输入框上下文标签，并唤起侧边栏 */
+  /** 将编辑器当前文件或选中代码添加到当前会话的草稿附件，并持久化 */
   public async addContextAttachment(att: ContextAttachment): Promise<void> {
-    const exists = this.pendingAttachments.some(
+    const session = this.sessions.getActiveSession();
+    const list = session.draftAttachments ?? [];
+    const exists = list.some(
       (item) =>
         item.type === att.type &&
         item.filePath === att.filePath &&
@@ -141,9 +141,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         item.endLine === att.endLine
     );
     if (!exists) {
-      this.pendingAttachments.push(att);
+      list.push(att);
+      session.draftAttachments = list;
+      this.sessions.save();
     }
-    await vscode.commands.executeCommand("ec2Claude.chatView.focus");
+    await vscode.commands.executeCommand("claudeBridge.chatView.focus");
     this.syncState();
   }
 
@@ -160,6 +162,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       updatedAt: s.updatedAt,
       messageCount: s.messages.length,
       hasRemoteSession: Boolean(s.claudeSessionId),
+      hasDraft: Boolean(
+        (s.draftText && s.draftText.trim()) ||
+          (s.draftAttachments && s.draftAttachments.length > 0)
+      ),
     }));
 
     const editor = vscode.window.activeTextEditor;
@@ -199,7 +205,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         gitBadge: this.gitBadge ?? null,
         activeEditor,
         isRunning: this.claude.isRunning(),
-        attachments: this.pendingAttachments,
+        attachments: activeSession.draftAttachments ?? [],
         activeSession,
         sessions: sessionSummaries,
       },
@@ -229,6 +235,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
 
+      case "saveDraft": {
+        const sid =
+          typeof msg.sessionId === "string" && msg.sessionId
+            ? msg.sessionId
+            : this.sessions.getActiveSession().id;
+        const text = typeof msg.text === "string" ? msg.text : "";
+        this.sessions.updateDraftText(sid, text);
+        break;
+      }
+
+      case "openLocalRules":
+        await vscode.commands.executeCommand("claudeBridge.openLocalRules");
+        break;
+
+      case "viewRemoteMemories":
+        await vscode.commands.executeCommand("claudeBridge.viewRemoteMemories");
+        break;
+
       case "syncRules": {
         const res = await this.rulesSync.sync(getBridgeConfig(), { force: true });
         if (res.ok) {
@@ -254,10 +278,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
 
-      case "refreshQuota": {
+      case "refreshQuota":
         await this.refreshQuota();
         break;
-      }
 
       case "connect":
         await this.bridge.connect(Boolean(msg.force));
@@ -274,14 +297,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "openSettings":
-        await vscode.commands.executeCommand(
-          "workbench.action.openSettings",
-          "ec2Claude"
-        );
+        await vscode.commands.executeCommand("claudeBridge.openSettings");
         break;
 
       case "openLogFile":
-        await vscode.commands.executeCommand("ec2Claude.openLogFile");
+        await vscode.commands.executeCommand("claudeBridge.openLogFile");
         break;
 
       case "setPermissionMode": {
@@ -333,18 +353,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       case "addCurrentFile":
-        await vscode.commands.executeCommand("ec2Claude.addCurrentFile");
+        await vscode.commands.executeCommand("claudeBridge.addCurrentFile");
         break;
 
       case "addSelection":
-        await vscode.commands.executeCommand("ec2Claude.sendSelection");
+        await vscode.commands.executeCommand("claudeBridge.sendSelection");
         break;
 
       case "removeAttachment": {
         const attId = String(msg.id ?? "");
-        this.pendingAttachments = this.pendingAttachments.filter(
+        const session = this.sessions.getActiveSession();
+        session.draftAttachments = (session.draftAttachments ?? []).filter(
           (a) => a.id !== attId
         );
+        this.sessions.save();
         this.syncState();
         break;
       }
@@ -371,7 +393,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       case "send": {
         const text = String(msg.text ?? "").trim();
-        if (!text && this.pendingAttachments.length === 0) {
+        const session = this.sessions.getActiveSession();
+        const hasAtt = (session.draftAttachments ?? []).length > 0;
+        if (!text && !hasAtt) {
           return;
         }
         await this.handleSendPrompt(text);
@@ -390,15 +414,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const ok = await this.bridge.connect(false);
       if (!ok) {
         vscode.window.showErrorMessage(
-          "EC2 Claude 未连接成功，请先检查本地 DevSpace 与 SSH 隧道状态。"
+          "ClaudeBridge 未连接成功，请先点击状态栏或设置中心检查连接状态。"
         );
         return;
       }
     }
 
     const session = this.sessions.getActiveSession();
-    const attachments = [...this.pendingAttachments];
-    this.pendingAttachments = [];
+    const attachments = [...(session.draftAttachments ?? [])];
+    // 发送即清空已持久化的草稿与附件
+    session.draftText = "";
+    session.draftAttachments = [];
 
     const userMsg: ChatMessage = {
       id: `msg_${Date.now()}_u`,
@@ -446,7 +472,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         session.lastContextHash = contextHash;
       }
 
-      // 顺手同步最新 Git 状态到界面徽标
       if (snapshot.primaryWorkspace && snapshot.workspaceName) {
         this.gitBadge = {
           workspaceName: snapshot.workspaceName,
@@ -506,7 +531,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     session.updatedAt = Date.now();
     this.sessions.save();
-    // 对话结束（Claude 可能修改了本地文件），刷新一次 Git 改动计数
     await this.refreshGitBadge(true);
     throttledSync(true);
   }
@@ -554,7 +578,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** 智能解析绝对路径、相对路径或短文件名（如 FML_FileStore.c）为真实本地文件 URI */
+  /** 智能解析绝对路径、相对路径或短文件名（如 main.c）为真实本地文件 URI */
   private async resolveLocalFileUri(
     rawInput: string
   ): Promise<vscode.Uri | undefined> {
@@ -568,7 +592,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     cleaned = cleaned.replace(/\\/g, "/");
 
-    // 1. 绝对路径直接校验
     if (path.isAbsolute(cleaned)) {
       if (this.isExistingFile(cleaned)) {
         return vscode.Uri.file(cleaned);
@@ -576,7 +599,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return undefined;
     }
 
-    // 2. 相对当前打开的所有工作区根目录校验
     const folders = vscode.workspace.workspaceFolders ?? [];
     for (const folder of folders) {
       const candidate = path.join(folder.uri.fsPath, cleaned);
@@ -585,7 +607,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    // 3. 短文件名或部分子路径：在当前工作区快速检索
     const normalizedGlob = cleaned.replace(/^\.?\//, "");
     let matches = await vscode.workspace.findFiles(
       `**/${normalizedGlob}`,
@@ -607,7 +628,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return matches[0];
     }
 
-    // 若多个同名文件，优先匹配当前活动编辑器或已打开标签页中的唯一命中
     const openPaths = new Set<string>();
     const activePath = vscode.window.activeTextEditor?.document.uri.fsPath;
     if (activePath) {
@@ -629,7 +649,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return openMatches[0];
     }
 
-    // 仍有多个候选时弹出轻量选择器
     const wsRoot = getActiveWorkspacePath();
     const picked = await vscode.window.showQuickPick(
       matches.map((uri) => ({
@@ -667,7 +686,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EC2 Claude</title>
+  <title>ClaudeBridge · 渡桥</title>
   <link rel="stylesheet" href="${cssUri}" />
 </head>
 <body>
@@ -707,7 +726,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <line x1="12" y1="19" x2="20" y2="19"/>
           </svg>
         </button>
-        <button id="settingsBtn" class="icon-btn" title="插件设置">
+        <button id="settingsBtn" class="icon-btn" title="规则、记忆与设置中心">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -735,7 +754,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               <span id="permBtnLabel">Bypass permissions</span>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
             </button>
-            <button id="modelBtn" class="pill-btn" title="切换远程模型">
+            <button id="modelBtn" class="pill-btn" title="切换远程模型与思考强度">
               <span id="modelBtnLabel">Default</span>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
             </button>

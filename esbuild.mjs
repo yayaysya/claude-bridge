@@ -25,17 +25,30 @@ const webviewOptions = {
   minify: !isWatch,
 };
 
+const settingsOptions = {
+  entryPoints: ["media/settings.js"],
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  target: "es2022",
+  outfile: "dist/settings.js",
+  sourcemap: true,
+  minify: !isWatch,
+};
+
 if (isWatch) {
-  const [extCtx, webCtx] = await Promise.all([
+  const [extCtx, webCtx, setCtx] = await Promise.all([
     esbuild.context(extensionOptions),
     esbuild.context(webviewOptions),
+    esbuild.context(settingsOptions),
   ]);
-  await Promise.all([extCtx.watch(), webCtx.watch()]);
+  await Promise.all([extCtx.watch(), webCtx.watch(), setCtx.watch()]);
   console.log("Watching for changes...");
 } else {
   await Promise.all([
     esbuild.build(extensionOptions),
     esbuild.build(webviewOptions),
+    esbuild.build(settingsOptions),
   ]);
-  console.log("Build complete: dist/extension.js & dist/webview.js");
+  console.log("Build complete: dist/extension.js, dist/webview.js, dist/settings.js");
 }

@@ -122,7 +122,7 @@ export class BridgeManager implements vscode.Disposable {
 
     // 1. 基础配置与密钥检查
     if (!cfg.sshHost || !cfg.sshUser) {
-      this.fail("SSH 主机或用户名未配置（请在插件设置中填写 ec2Claude.sshHost）");
+      this.fail("SSH 主机或用户名未配置（请在可视化设置中心填写服务器地址）");
       return false;
     }
     if (!fs.existsSync(cfg.sshKeyPath)) {
@@ -633,8 +633,8 @@ export class BridgeManager implements vscode.Disposable {
       text.includes("探测超时")
     ) {
       return this.activeProxy
-        ? `连接超时（经由代理 ${this.activeProxy.host}:${this.activeProxy.port} 连不上 EC2）`
-        : "直连 EC2 超时（如本地需走代理，请检查 VPN 或 ec2Claude.sshProxy 设置）";
+        ? `连接超时（经由代理 ${this.activeProxy.host}:${this.activeProxy.port} 连不上远程主机）`
+        : "直连远程主机超时（如本地需走代理，请检查 VPN 或设置中心里的代理策略）";
     }
     if (text.includes("permission denied") || text.includes("bad permissions")) {
       return "SSH 密钥认证失败，请检查私钥路径与权限";

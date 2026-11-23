@@ -47,11 +47,43 @@ export function expandHomePath(inputPath: string): string {
   return trimmed;
 }
 
+/** 兼容读取 claudeBridge.* 与旧版 ec2Claude.* 配置，确保升级无缝衔接 */
+function readCompat<T>(
+  primaryCfg: vscode.WorkspaceConfiguration,
+  legacyCfg: vscode.WorkspaceConfiguration,
+  key: string,
+  fallback: T
+): T {
+  const inspected = primaryCfg.inspect<T>(key);
+  const hasPrimary =
+    inspected?.workspaceFolderValue !== undefined ||
+    inspected?.workspaceValue !== undefined ||
+    inspected?.globalValue !== undefined;
+  if (hasPrimary) {
+    return primaryCfg.get<T>(key, fallback);
+  }
+  const legacyInspected = legacyCfg.inspect<T>(key);
+  const hasLegacy =
+    legacyInspected?.workspaceFolderValue !== undefined ||
+    legacyInspected?.workspaceValue !== undefined ||
+    legacyInspected?.globalValue !== undefined;
+  if (hasLegacy) {
+    return legacyCfg.get<T>(key, fallback);
+  }
+  return primaryCfg.get<T>(key, fallback);
+}
+
 /** 读取当前插件配置 */
 export function getBridgeConfig(): BridgeConfig {
-  const cfg = vscode.workspace.getConfiguration("ec2Claude");
+  const cfg = vscode.workspace.getConfiguration("claudeBridge");
+  const legacy = vscode.workspace.getConfiguration("ec2Claude");
 
-  const permissionMode = cfg.get<string>("permissionMode", "bypassPermissions");
+  const permissionMode = readCompat<string>(
+    cfg,
+    legacy,
+    "permissionMode",
+    "bypassPermissions"
+  );
   const validModes: PermissionMode[] = [
     "bypassPermissions",
     "acceptEdits",
@@ -64,7 +96,7 @@ export function getBridgeConfig(): BridgeConfig {
     ? (permissionMode as PermissionMode)
     : "bypassPermissions";
 
-  const effortRaw = cfg.get<string>("effort", "").trim();
+  const effortRaw = readCompat<string>(cfg, legacy, "effort", "").trim();
   const validEfforts: EffortLevel[] = ["", "low", "medium", "high", "xhigh", "max"];
   const resolvedEffort: EffortLevel = validEfforts.includes(
     effortRaw as EffortLevel
@@ -73,56 +105,80 @@ export function getBridgeConfig(): BridgeConfig {
     : "";
 
   return {
-    sshHost: cfg.get<string>("sshHost", "").trim(),
-    sshUser: cfg.get<string>("sshUser", "ubuntu").trim(),
-    sshPort: cfg.get<number>("sshPort", 22),
-    sshKeyPath: expandHomePath(cfg.get<string>("sshKeyPath", "")),
-    sshProxy: cfg.get<string>("sshProxy", "auto").trim(),
-    localPort: cfg.get<number>("localPort", 7676),
-    remotePort: cfg.get<number>("remotePort", 7676),
-    devspacePath: expandHomePath(cfg.get<string>("devspacePath", "")),
-    remoteClaudePath: cfg.get<string>("remoteClaudePath", "claude").trim(),
+    sshHost: readCompat<string>(cfg, legacy, "sshHost", "").trim(),
+    sshUser: readCompat<string>(cfg, legacy, "sshUser", "ubuntu").trim(),
+    sshPort: readCompat<number>(cfg, legacy, "sshPort", 22),
+    sshKeyPath: expandHomePath(
+      readCompat<string>(cfg, legacy, "sshKeyPath", "")
+    ),
+    sshProxy: readCompat<string>(cfg, legacy, "sshProxy", "auto").trim(),
+    localPort: readCompat<number>(cfg, legacy, "localPort", 7676),
+    remotePort: readCompat<number>(cfg, legacy, "remotePort", 7676),
+    devspacePath: expandHomePath(
+      readCompat<string>(cfg, legacy, "devspacePath", "")
+    ),
+    remoteClaudePath: readCompat<string>(
+      cfg,
+      legacy,
+      "remoteClaudePath",
+      "claude"
+    ).trim(),
     permissionMode: resolvedMode,
-    model: cfg.get<string>("model", "").trim(),
+    model: readCompat<string>(cfg, legacy, "model", "").trim(),
     effort: resolvedEffort,
-    autoConnect: cfg.get<boolean>("autoConnect", true),
-    autoReconnect: cfg.get<boolean>("autoReconnect", true),
-    keepRunningOnClose: cfg.get<boolean>("keepRunningOnClose", false),
-    autoAttachWorkspaceContext: cfg.get<boolean>(
+    autoConnect: readCompat<boolean>(cfg, legacy, "autoConnect", true),
+    autoReconnect: readCompat<boolean>(cfg, legacy, "autoReconnect", true),
+    keepRunningOnClose: readCompat<boolean>(
+      cfg,
+      legacy,
+      "keepRunningOnClose",
+      false
+    ),
+    autoAttachWorkspaceContext: readCompat<boolean>(
+      cfg,
+      legacy,
       "autoAttachWorkspaceContext",
       true
     ),
-    syncLocalRules: cfg.get<boolean>("syncLocalRules", false),
-    localClaudeMdPaths: cfg.get<string[]>("localClaudeMdPaths", [
+    syncLocalRules: readCompat<boolean>(cfg, legacy, "syncLocalRules", false),
+    localClaudeMdPaths: readCompat<string[]>(cfg, legacy, "localClaudeMdPaths", [
       "~/.claude/CLAUDE.md",
     ]),
   };
+}
+
+/** 批量写入插件配置（统一写入 Global/Remote 作用域，避免用户手动切 Tab 混淆） */
+export async function updateBridgeConfigValues(
+  patch: Partial<BridgeConfig>
+): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("claudeBridge");
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined) {
+      await cfg.update(key, value, vscode.ConfigurationTarget.Global);
+    }
+  }
 }
 
 /** 更新全局权限模式 */
 export async function updatePermissionMode(
   mode: PermissionMode
 ): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("ec2Claude");
-  await cfg.update("permissionMode", mode, vscode.ConfigurationTarget.Global);
+  await updateBridgeConfigValues({ permissionMode: mode });
 }
 
 /** 更新全局模型设置 */
 export async function updateModel(model: string): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("ec2Claude");
-  await cfg.update("model", model, vscode.ConfigurationTarget.Global);
+  await updateBridgeConfigValues({ model });
 }
 
 /** 更新全局思考强度设置 */
 export async function updateEffort(effort: EffortLevel): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("ec2Claude");
-  await cfg.update("effort", effort, vscode.ConfigurationTarget.Global);
+  await updateBridgeConfigValues({ effort });
 }
 
 /** 更新全局自动同步本地 CLAUDE.md 开关 */
 export async function updateSyncLocalRules(enabled: boolean): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("ec2Claude");
-  await cfg.update("syncLocalRules", enabled, vscode.ConfigurationTarget.Global);
+  await updateBridgeConfigValues({ syncLocalRules: enabled });
 }
 
 /** 解析后的 SSH 代理配置 */
