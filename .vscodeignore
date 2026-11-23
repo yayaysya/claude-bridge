@@ -1,5 +1,6 @@
 .vscode/**
 src/**
+setup/**
 media/webview.js
 media/settings.js
 node_modules/**

@@ -2,7 +2,7 @@
   "name": "claude-bridge",
   "displayName": "ClaudeBridge · 渡桥",
   "description": "ClaudeBridge（渡桥）：通过本地 DevSpace MCP 与 SSH 反向隧道连接远程服务器上的 Claude Code，代码留在本地、AI 流量留在远程，提供侧边栏 Agent 面板、可视化设置中心与规则记忆管理。",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.90.0"

@@ -63,7 +63,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       void this.refreshGitBadge(true);
     });
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      this.sessions.switchWorkspace(getActiveWorkspacePath());
       void this.refreshGitBadge(true);
+      this.syncState();
     });
     void this.refreshGitBadge(true);
   }

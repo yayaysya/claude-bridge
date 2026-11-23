@@ -1,7 +1,9 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { getActiveWorkspacePath } from "./config";
 
 /** 附加到对话的本地上下文（文件或代码选区） */
 export interface ContextAttachment {
@@ -78,51 +80,93 @@ export interface QuotaSnapshot {
   lastModel?: string;
 }
 
-interface PersistedStoreFile {
+interface PersistedWorkspaceFile {
   version: number;
+  workspacePath: string;
   activeSessionId?: string;
   sessions: ChatSession[];
+}
+
+interface LegacySessionsFile {
+  version?: number;
+  activeSessionId?: string;
+  sessions?: ChatSession[];
   quota?: QuotaSnapshot;
 }
 
 const DATA_DIR = path.join(os.homedir(), ".claude-bridge");
-const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
-const STORAGE_KEY = "claudeBridge.sessions.v1";
-const LEGACY_STORAGE_KEY = "ec2Claude.sessions.v1";
-const ACTIVE_KEY = "claudeBridge.activeSessionId.v1";
-const LEGACY_ACTIVE_KEY = "ec2Claude.activeSessionId.v1";
+const WORKSPACES_DIR = path.join(DATA_DIR, "workspaces");
+const QUOTA_FILE = path.join(DATA_DIR, "quota.json");
+const LEGACY_SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 const QUOTA_KEY = "claudeBridge.quota.v1";
 const LEGACY_QUOTA_KEY = "ec2Claude.quota.v1";
 const MAX_SESSIONS = 40;
 
+/** 根据工作区绝对路径计算稳定的隔离文件名（可读项目名 + 8位哈希防重名） */
+export function resolveWorkspaceSessionFile(workspacePath?: string): {
+  normalizedWorkspace: string;
+  filePath: string;
+} {
+  const cleaned = (workspacePath ?? "").trim().replace(/[\\/]+$/, "");
+  if (!cleaned) {
+    return {
+      normalizedWorkspace: "",
+      filePath: path.join(WORKSPACES_DIR, "no-workspace.json"),
+    };
+  }
+  const baseName = path.basename(cleaned).replace(/[^a-zA-Z0-9._-]/g, "_") || "project";
+  const hash = crypto.createHash("sha256").update(cleaned).digest("hex").slice(0, 8);
+  return {
+    normalizedWorkspace: cleaned,
+    filePath: path.join(WORKSPACES_DIR, `${baseName}_${hash}.json`),
+  };
+}
+
 /**
- * 本地会话与草稿持久化管理器
- * 优先落盘到独立文件 ~/.claude-bridge/sessions.json（原子写入），
- * 避免因插件改名、更换 publisher 或卸载重装导致 VS Code globalState 隔离丢历史。
+ * 按工作区隔离的会话与草稿持久化管理器
+ * - 每个项目目录独立落盘到 ~/.claude-bridge/workspaces/<project>_<hash>.json，
+ *   多窗口并发开发彻底不串台、不互相覆盖；
+ * - 额度单独存放在 ~/.claude-bridge/quota.json，所有窗口实时共享同一账号额度。
  */
 export class SessionStore {
   private sessions: ChatSession[] = [];
   private activeSessionId: string | undefined;
+  private workspacePath = "";
+  private sessionFilePath = "";
   private quota: QuotaSnapshot | undefined;
 
   constructor(private readonly state: vscode.Memento) {
-    const fileData = this.loadFromFile();
+    this.quota = this.loadQuotaFromFile();
+    this.switchWorkspace(getActiveWorkspacePath());
+  }
+
+  /** 切换或初始化当前工作区对应的独立会话文件 */
+  public switchWorkspace(workspacePath?: string): void {
+    const resolved = resolveWorkspaceSessionFile(workspacePath);
+    if (
+      this.sessionFilePath === resolved.filePath &&
+      this.sessions.length > 0
+    ) {
+      return;
+    }
+
+    this.workspacePath = resolved.normalizedWorkspace;
+    this.sessionFilePath = resolved.filePath;
+    this.sessions = [];
+    this.activeSessionId = undefined;
+
+    const fileData = this.loadWorkspaceFile(this.sessionFilePath);
     if (fileData && fileData.sessions.length > 0) {
       this.sessions = fileData.sessions;
       this.activeSessionId = fileData.activeSessionId;
-      this.quota = fileData.quota;
     } else {
-      // 首次从旧 globalState 自动迁移到独立文件
-      const current = this.state.get<ChatSession[]>(STORAGE_KEY);
-      const legacy = this.state.get<ChatSession[]>(LEGACY_STORAGE_KEY);
-      this.sessions =
-        current && current.length > 0 ? current : legacy ?? [];
-      this.activeSessionId =
-        this.state.get<string>(ACTIVE_KEY) ??
-        this.state.get<string>(LEGACY_ACTIVE_KEY);
-      this.quota =
-        this.state.get<QuotaSnapshot>(QUOTA_KEY) ??
-        this.state.get<QuotaSnapshot>(LEGACY_QUOTA_KEY);
+      // 仅当旧版全局 sessions.json 存在且内容归属当前项目时认领迁移，绝不污染其他新项目
+      const migrated = this.tryMigrateLegacyFileForWorkspace(this.workspacePath);
+      if (migrated && migrated.sessions.length > 0) {
+        this.sessions = migrated.sessions;
+        this.activeSessionId = migrated.activeSessionId;
+        this.persistSessions();
+      }
     }
 
     if (this.sessions.length === 0) {
@@ -132,9 +176,7 @@ export class SessionStore {
       !this.sessions.some((s) => s.id === this.activeSessionId)
     ) {
       this.activeSessionId = this.sessions[0].id;
-      this.persist();
-    } else if (!fileData) {
-      this.persist();
+      this.persistSessions();
     }
   }
 
@@ -160,7 +202,7 @@ export class SessionStore {
       return undefined;
     }
     this.activeSessionId = found.id;
-    this.persist();
+    this.persistSessions();
     return found;
   }
 
@@ -180,7 +222,7 @@ export class SessionStore {
       this.sessions = this.sessions.slice(0, MAX_SESSIONS);
     }
     this.activeSessionId = session.id;
-    this.persist();
+    this.persistSessions();
     return session;
   }
 
@@ -192,11 +234,11 @@ export class SessionStore {
     if (this.activeSessionId === sessionId) {
       this.activeSessionId = this.sessions[0].id;
     }
-    this.persist();
+    this.persistSessions();
     return this.getActiveSession();
   }
 
-  /** 更新指定会话的草稿文本并持久化 */
+  /** 更新指定会话的草稿文本并持久化到当前项目独立文件 */
   public updateDraftText(sessionId: string, text: string): void {
     const target = this.sessions.find((s) => s.id === sessionId);
     if (!target) {
@@ -206,29 +248,37 @@ export class SessionStore {
       return;
     }
     target.draftText = text;
-    this.persist();
+    this.persistSessions();
   }
 
   public save(): void {
-    this.persist();
+    this.persistSessions();
   }
 
+  /** 读取共享额度文件（支持多窗口实时共享最新额度） */
   public getQuota(): QuotaSnapshot | undefined {
+    const latest = this.loadQuotaFromFile();
+    if (latest) {
+      this.quota = latest;
+    }
     return this.quota;
   }
 
   public saveQuota(quota: QuotaSnapshot): void {
     this.quota = quota;
-    this.persist();
+    this.atomicWriteJson(QUOTA_FILE, quota);
+    void this.state.update(QUOTA_KEY, quota);
   }
 
-  private loadFromFile(): PersistedStoreFile | undefined {
+  private loadWorkspaceFile(
+    filePath: string
+  ): PersistedWorkspaceFile | undefined {
     try {
-      if (!fs.existsSync(SESSIONS_FILE)) {
+      if (!fs.existsSync(filePath)) {
         return undefined;
       }
-      const raw = fs.readFileSync(SESSIONS_FILE, "utf8");
-      const parsed = JSON.parse(raw) as PersistedStoreFile;
+      const raw = fs.readFileSync(filePath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedWorkspaceFile;
       if (!parsed || !Array.isArray(parsed.sessions)) {
         return undefined;
       }
@@ -238,27 +288,86 @@ export class SessionStore {
     }
   }
 
-  private persist(): void {
-    const payload: PersistedStoreFile = {
-      version: 1,
+  private loadQuotaFromFile(): QuotaSnapshot | undefined {
+    try {
+      if (fs.existsSync(QUOTA_FILE)) {
+        const raw = fs.readFileSync(QUOTA_FILE, "utf8");
+        const parsed = JSON.parse(raw) as QuotaSnapshot;
+        if (parsed && typeof parsed.updatedAt === "number") {
+          return parsed;
+        }
+      }
+    } catch {
+      // 忽略损坏文件并回退
+    }
+    return (
+      this.state.get<QuotaSnapshot>(QUOTA_KEY) ??
+      this.state.get<QuotaSnapshot>(LEGACY_QUOTA_KEY)
+    );
+  }
+
+  /** 将旧版未分项目的 sessions.json 精准迁移给匹配的工作区一次，防止串台到其他新项目 */
+  private tryMigrateLegacyFileForWorkspace(
+    currentWorkspace: string
+  ): { sessions: ChatSession[]; activeSessionId?: string } | undefined {
+    try {
+      if (!fs.existsSync(LEGACY_SESSIONS_FILE)) {
+        return undefined;
+      }
+      const raw = fs.readFileSync(LEGACY_SESSIONS_FILE, "utf8");
+      const legacy = JSON.parse(raw) as LegacySessionsFile;
+
+      // 顺手把旧文件里的额度迁到共享 quota.json
+      if (legacy.quota && !fs.existsSync(QUOTA_FILE)) {
+        this.saveQuota(legacy.quota);
+      }
+
+      if (!Array.isArray(legacy.sessions) || legacy.sessions.length === 0) {
+        return undefined;
+      }
+
+      // 仅当旧会话内容明确引用了当前工作区路径或项目名时才认领，避免把 A 项目记录错配给 B 项目
+      const wsName = currentWorkspace ? path.basename(currentWorkspace) : "";
+      const matched =
+        Boolean(currentWorkspace) &&
+        (raw.includes(currentWorkspace) || (wsName.length >= 3 && raw.includes(wsName)));
+      if (!matched) {
+        return undefined;
+      }
+
+      const migratedBackup = path.join(DATA_DIR, "sessions.legacy.migrated.json");
+      fs.renameSync(LEGACY_SESSIONS_FILE, migratedBackup);
+      return {
+        sessions: legacy.sessions,
+        activeSessionId: legacy.activeSessionId,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private persistSessions(): void {
+    if (!this.sessionFilePath) {
+      return;
+    }
+    const payload: PersistedWorkspaceFile = {
+      version: 2,
+      workspacePath: this.workspacePath,
       activeSessionId: this.activeSessionId,
       sessions: this.sessions,
-      quota: this.quota,
     };
+    this.atomicWriteJson(this.sessionFilePath, payload);
+  }
 
+  /** 带 PID 后缀的原子写盘，彻底避免多窗口并发写坏 JSON */
+  private atomicWriteJson(targetPath: string, data: unknown): void {
     try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      const tmpPath = `${SESSIONS_FILE}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), "utf8");
-      fs.renameSync(tmpPath, SESSIONS_FILE);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      const tmpPath = `${targetPath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      fs.renameSync(tmpPath, targetPath);
     } catch {
-      // 文件写盘异常时降级写入 globalState
-    }
-
-    void this.state.update(STORAGE_KEY, this.sessions);
-    void this.state.update(ACTIVE_KEY, this.activeSessionId);
-    if (this.quota) {
-      void this.state.update(QUOTA_KEY, this.quota);
+      // 文件写入异常不影响主流程
     }
   }
 }
