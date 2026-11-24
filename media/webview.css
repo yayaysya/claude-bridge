@@ -419,9 +419,365 @@ body {
   top: 44px;
   left: 10px;
   right: 10px;
-  max-width: 360px;
-  max-height: 280px;
+  max-width: 390px;
+  padding: 6px;
+}
+
+.history-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin-bottom: 5px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+}
+
+.history-search-wrap:focus-within {
+  border-color: var(--claude-orange-border);
+}
+
+.history-search-icon {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.history-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.history-search-input::placeholder {
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.history-search-clear {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.history-search-clear:hover {
+  color: var(--fg);
+}
+
+.history-list-body {
+  max-height: 300px;
   overflow-y: auto;
+}
+
+.history-empty {
+  padding: 16px 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.search-hit-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.search-hit-item:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+.search-hit-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.search-hit-role {
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.search-hit-role.user {
+  background: var(--claude-orange-soft);
+  color: var(--claude-orange);
+}
+
+.search-hit-role.assistant {
+  background: rgba(128, 128, 128, 0.18);
+  color: var(--fg);
+}
+
+.search-hit-session {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-hit-snippet {
+  font-size: 12px;
+  color: var(--fg);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.search-mark {
+  background: rgba(217, 119, 87, 0.28);
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+@keyframes jumpFlash {
+  0% {
+    box-shadow: 0 0 0 2px var(--claude-orange), 0 0 14px rgba(217, 119, 87, 0.45);
+    background: rgba(217, 119, 87, 0.14);
+  }
+  70% {
+    box-shadow: 0 0 0 2px var(--claude-orange-border), 0 0 10px rgba(217, 119, 87, 0.2);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+.msg-jump-highlight {
+  border-radius: 10px;
+  animation: jumpFlash 2.6s ease-out;
+}
+
+/* ===== 缓存冷热预警条 & 智能交接卡片 ===== */
+.cache-alert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 7px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.cache-alert-bar.danger {
+  background: rgba(217, 119, 87, 0.12);
+  border-color: var(--claude-orange-border);
+}
+
+.cache-alert-bar.warn {
+  background: rgba(210, 153, 34, 0.11);
+  border-color: rgba(210, 153, 34, 0.42);
+}
+
+.cache-alert-bar.info {
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+.cache-alert-text {
+  flex: 1;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cache-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.cache-alert-bar.danger .cache-alert-title {
+  color: var(--claude-orange);
+}
+
+.cache-alert-bar.warn .cache-alert-title {
+  color: var(--warn);
+}
+
+.cache-alert-desc {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cache-alert-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.cache-handoff-btn {
+  border: 1px solid var(--claude-orange-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--claude-orange);
+  color: #ffffff;
+  white-space: nowrap;
+  transition: opacity 0.12s;
+}
+
+.cache-handoff-btn:hover {
+  opacity: 0.9;
+}
+
+.cache-handoff-btn.info {
+  background: var(--claude-orange-soft);
+  color: var(--claude-orange);
+}
+
+.cache-handoff-btn.ghost {
+  background: transparent;
+  border-color: var(--border-strong);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.cache-handoff-btn.ghost:hover {
+  background: var(--surface-hover);
+}
+
+.older-sentinel {
+  text-align: center;
+  padding: 6px 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.75;
+  user-select: none;
+}
+
+.cache-dismiss-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.cache-dismiss-btn:hover {
+  color: var(--fg);
+  background: var(--surface-hover);
+}
+
+.handoff-empty-wrap {
+  padding: 10px 2px 4px;
+}
+
+.handoff-card {
+  border: 1px solid var(--claude-orange-border);
+  border-radius: 10px;
+  background: var(--surface);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.handoff-card-head {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--claude-orange-soft);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--claude-orange);
+}
+
+.handoff-card-head::-webkit-details-marker {
+  display: none;
+}
+
+.handoff-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.handoff-card-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.handoff-mode-tag {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--fg);
+}
+
+.handoff-source-btn {
+  border: 1px solid var(--claude-orange-border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--claude-orange);
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.handoff-source-btn:hover {
+  background: var(--surface-hover);
+}
+
+.handoff-card-body {
+  padding: 9px 11px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.handoff-card-foot {
+  padding: 6px 11px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px dashed var(--border);
 }
 
 .popover-header {
@@ -1042,6 +1398,84 @@ details.tool-row summary:hover {
 
 .msg-copy-btn.copied {
   color: var(--success);
+}
+
+.msg-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.msg-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--claude-orange-border);
+  border-radius: 5px;
+  background: var(--claude-orange-soft);
+  color: var(--claude-orange);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, opacity 0.12s;
+}
+
+.msg-retry-btn:hover:not(:disabled) {
+  background: rgba(217, 119, 87, 0.24);
+}
+
+.msg-retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.retry-warn-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(210, 153, 34, 0.42);
+  background: rgba(210, 153, 34, 0.1);
+  font-size: 11.5px;
+  color: var(--fg);
+}
+
+.retry-warn-text {
+  flex: 1;
+  min-width: 180px;
+  line-height: 1.4;
+}
+
+.retry-reconnect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid rgba(210, 153, 34, 0.55);
+  border-radius: 5px;
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--warn);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s;
+}
+
+.retry-reconnect-btn:hover:not(:disabled) {
+  background: rgba(210, 153, 34, 0.3);
+}
+
+.retry-reconnect-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* ===== 底部 Claude Code 一体化圆角输入卡片 ===== */

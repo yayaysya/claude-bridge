@@ -94,6 +94,7 @@ if [[ "${WITH_DESKTOP}" == "true" ]]; then
     openbox \
     x11-xserver-utils \
     xterm \
+    xclip \
     xdg-utils \
     fonts-dejavu-core \
     fonts-noto-cjk \
@@ -176,10 +177,12 @@ start_all() {
   xsetroot -solid "#181818" 2>/dev/null || true
   openbox >"\$PID_DIR/openbox.log" 2>&1 &
 
-  # 居中自动打开一个干净终端，方便直接执行 claude 登录与 /mcp 授权
+  # 居中自动打开一个干净终端（支持 Ctrl+Shift+V / Ctrl+Shift+C 剪贴板粘贴与复制）
   xterm -fa "DejaVu Sans Mono" -fs 11 -bg "#111111" -fg "#eeeeee" -geometry 96x26+40+40 \
+    -xrm 'XTerm*selectToClipboard: true' \
+    -xrm 'XTerm*VT100.translations: #override \n Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \n Ctrl Shift <Key>C: copy-selection(CLIPBOARD)' \
     -T "Claude Login Terminal" \
-    -e bash -lc 'export PATH="\$HOME/.local/bin:\$HOME/.npm-global/bin:\$PATH"; echo "=== Claude 首次登录终端 ==="; echo "1. 输入 claude 登录你的账号"; echo "2. 登录后输入 /mcp 授权 devspace"; echo ""; exec bash' \
+    -e bash -lc 'export PATH="\$HOME/.local/bin:\$HOME/.npm-global/bin:\$PATH"; echo "=== Claude 首次登录终端 ==="; echo "1. 输入 claude 登录你的账号"; echo "2. 登录后输入 /mcp 授权 devspace"; echo "提示：浏览器按 Ctrl+V、终端按 Ctrl+Shift+V 粘贴"; echo ""; exec bash' \
     >"\$PID_DIR/xterm.log" 2>&1 &
 
   # 3. 启动仅监听 127.0.0.1:6080 的 noVNC Web 网关

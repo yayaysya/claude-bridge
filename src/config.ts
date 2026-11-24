@@ -1,7 +1,32 @@
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
+import { spawnSync } from "child_process";
 import * as vscode from "vscode";
+
+let extensionRootPath = "";
+let cachedHasNativeNc: boolean | undefined;
+
+/** 注入扩展根目录路径，用于定位内置跨平台 proxyBridge.js */
+export function setExtensionRootPath(rootDir: string): void {
+  extensionRootPath = rootDir;
+}
+
+function hasNativeNc(): boolean {
+  if (process.platform === "win32") {
+    return false;
+  }
+  if (cachedHasNativeNc !== undefined) {
+    return cachedHasNativeNc;
+  }
+  try {
+    const res = spawnSync("which", ["nc"], { stdio: "ignore" });
+    cachedHasNativeNc = res.status === 0;
+  } catch {
+    cachedHasNativeNc = false;
+  }
+  return cachedHasNativeNc;
+}
 
 /** 远程 Claude Code 支持的权限模式 */
 export type PermissionMode =
@@ -279,10 +304,23 @@ export function buildBaseSshArgs(
   const effectiveProxy =
     options?.proxy === undefined ? resolveSshProxy(cfg) : options.proxy;
   if (effectiveProxy) {
-    args.push(
-      "-o",
-      `ProxyCommand=nc -X ${effectiveProxy.protocol} -x ${effectiveProxy.host}:${effectiveProxy.port} %h %p`
-    );
+    const proxyScript = extensionRootPath
+      ? path.join(extensionRootPath, "dist", "proxyBridge.js")
+      : "";
+    // Linux/WSL/macOS 优先用原生 nc；纯 Windows 或无 nc 环境自动走内置纯 Node.js 代理桥
+    if (!hasNativeNc() && proxyScript && fs.existsSync(proxyScript)) {
+      const normalizedScript = proxyScript.replace(/\\/g, "/");
+      const bridgeMode = effectiveProxy.protocol === "5" ? "socks5" : "http";
+      args.push(
+        "-o",
+        `ProxyCommand=node "${normalizedScript}" ${bridgeMode} ${effectiveProxy.host} ${effectiveProxy.port} %h %p`
+      );
+    } else {
+      args.push(
+        "-o",
+        `ProxyCommand=nc -X ${effectiveProxy.protocol} -x ${effectiveProxy.host}:${effectiveProxy.port} %h %p`
+      );
+    }
   }
 
   if (options?.batchMode !== false) {

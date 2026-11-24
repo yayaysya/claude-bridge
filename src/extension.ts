@@ -3,39 +3,47 @@ import * as vscode from "vscode";
 import { BridgeManager, BridgeState } from "./bridgeManager";
 import { ChatViewProvider } from "./chatViewProvider";
 import { ClaudeClient } from "./claudeClient";
-import { getBridgeConfig } from "./config";
+import { getBridgeConfig, setExtensionRootPath } from "./config";
 import { ContextAttachment, SessionStore } from "./sessionStore";
 import { TerminalManager } from "./terminalManager";
 import { RulesSyncManager } from "./rulesSync";
 import { BridgeLogger } from "./logger";
 import { MemoryManager } from "./memoryManager";
 import { SettingsPanel } from "./settingsPanel";
+import { SetupWizardManager } from "./setupWizard";
+import { ProfileStore } from "./profileStore";
 
 let bridgeManager: BridgeManager | undefined;
 let terminalManager: TerminalManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  setExtensionRootPath(context.extensionPath);
   const outputChannel = vscode.window.createOutputChannel("ClaudeBridge · 渡桥");
   const logger = new BridgeLogger(outputChannel);
+  const profileStore = new ProfileStore();
   bridgeManager = new BridgeManager(logger);
   terminalManager = new TerminalManager(logger);
   const claudeClient = new ClaudeClient(logger);
   const sessionStore = new SessionStore(context.globalState);
   const rulesSync = new RulesSyncManager(logger, context.globalState);
   const memoryManager = new MemoryManager(logger);
+  const wizardManager = new SetupWizardManager(logger);
   const chatProvider = new ChatViewProvider(
     context.extensionUri,
     bridgeManager,
     claudeClient,
     sessionStore,
     terminalManager,
-    rulesSync
+    rulesSync,
+    profileStore
   );
 
   // 注册左侧 Agent 聊天面板
   context.subscriptions.push(
     logger,
+    profileStore,
     bridgeManager,
+    wizardManager,
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewId,
       chatProvider,
@@ -53,26 +61,27 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(statusBar);
 
   const updateStatusBar = (state: BridgeState) => {
+    const profileName = profileStore.getActiveProfile().name;
     switch (state.status) {
       case "connected":
-        statusBar.text = "$(plug) ClaudeBridge: 已连接";
+        statusBar.text = `$(plug) ${profileName}: 已连接`;
         statusBar.backgroundColor = undefined;
-        statusBar.tooltip = `${state.detail}\n点击打开渡桥快捷菜单`;
+        statusBar.tooltip = `ClaudeBridge · ${profileName}\n${state.detail}\n点击打开渡桥快捷菜单`;
         break;
       case "connecting":
-        statusBar.text = "$(sync~spin) ClaudeBridge: 连接中";
+        statusBar.text = `$(sync~spin) ${profileName}: 连接中`;
         statusBar.backgroundColor = undefined;
         statusBar.tooltip = state.detail;
         break;
       case "error":
-        statusBar.text = "$(error) ClaudeBridge: 已断开";
+        statusBar.text = `$(error) ${profileName}: 已断开`;
         statusBar.backgroundColor = new vscode.ThemeColor(
           "statusBarItem.errorBackground"
         );
         statusBar.tooltip = `${state.detail}\n点击重连或查看诊断日志`;
         break;
       default:
-        statusBar.text = "$(debug-disconnect) ClaudeBridge: 未连接";
+        statusBar.text = `$(debug-disconnect) ${profileName}: 未连接`;
         statusBar.backgroundColor = undefined;
         statusBar.tooltip = "点击一键连接本地 DevSpace 与远程 Claude";
         break;
@@ -95,14 +104,20 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  const openSettingsPanel = (focusSection?: "server" | "memory") =>
+  const openSettingsPanel = (
+    focusSection?: "server" | "memory",
+    initialTab?: "general" | "wizard"
+  ) =>
     SettingsPanel.show({
       extensionUri: context.extensionUri,
       bridge: bridgeManager!,
       rulesSync,
       memory: memoryManager,
+      wizard: wizardManager,
+      profiles: profileStore,
       logger,
       focusSection,
+      initialTab,
     });
 
   // 注册全部插件命令
@@ -190,7 +205,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand("claudeBridge.openSettings", () => {
-      openSettingsPanel("server");
+      openSettingsPanel("server", "general");
+    }),
+
+    vscode.commands.registerCommand("claudeBridge.openSetupWizard", () => {
+      openSettingsPanel(undefined, "wizard");
     }),
 
     vscode.commands.registerCommand("claudeBridge.openLocalRules", async () => {
@@ -227,6 +246,11 @@ export function activate(context: vscode.ExtensionContext): void {
           label: "$(gear) 打开可视化设置中心",
           description: "服务器、代理、测试连接、规则与远程记忆",
           action: "settings",
+        },
+        {
+          label: "$(rocket) 打开新机配置向导",
+          description: "4 步图形化一键配置本地 DevSpace、新 VPS 与免客户端网页登录",
+          action: "wizard",
         },
         {
           label: "$(terminal) 打开原生远程 Claude 终端",
@@ -277,6 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const actionMap: Record<string, string> = {
         chat: "claudeBridge.openChat",
         settings: "claudeBridge.openSettings",
+        wizard: "claudeBridge.openSetupWizard",
         terminal: "claudeBridge.openTerminal",
         connect: "claudeBridge.connect",
         disconnect: "claudeBridge.disconnect",

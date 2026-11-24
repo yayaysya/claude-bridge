@@ -22,6 +22,7 @@ import {
 } from "./sessionStore";
 import { TerminalManager } from "./terminalManager";
 import { RulesSyncManager } from "./rulesSync";
+import { ProfileStore } from "./profileStore";
 import {
   collectGitBadgeInfo,
   collectWorkspaceSnapshot,
@@ -31,16 +32,24 @@ import {
 
 /**
  * 侧边栏 Agent 聊天面板（ClaudeBridge · 渡桥）
- * 支持流式回复、草稿与附件持久化、工作区/Git 感知、实时额度与文件行号点击跳转。
+ * 支持流式回复、多 VPS 秒切、草稿与附件持久化、工作区/Git 感知、实时额度与文件行号点击跳转。
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = "claudeBridge.chatView";
 
   private view: vscode.WebviewView | undefined;
   private activeRun: ClaudeRunHandle | undefined;
+  private streamingMessageId: string | undefined;
+  private consecutiveFailures = 0;
+  private isHandingOff = false;
+  /** 当前会话默认只向前端下发最近 N 条消息，上滑到顶部自动按批加载更早记录，避免几百条历史拖慢打开速度 */
+  private visibleMessageCount = 20;
+  private lastSyncedSessionId = "";
   private gitBadge: GitBadgeInfo | undefined;
   private lastGitRefreshAt = 0;
   private isRefreshingQuota = false;
+  private lastAutoQuotaAt = 0;
+  private static readonly AUTO_QUOTA_COOLDOWN_MS = 10 * 60 * 1000;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -48,9 +57,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly claude: ClaudeClient,
     private readonly sessions: SessionStore,
     private readonly terminal: TerminalManager,
-    private readonly rulesSync: RulesSyncManager
+    private readonly rulesSync: RulesSyncManager,
+    private readonly profiles: ProfileStore
   ) {
     this.bridge.onDidChangeState(() => {
+      this.syncState();
+    });
+    this.profiles.onDidChangeActiveProfile((profile) => {
+      this.consecutiveFailures = 0;
+      this.sessions.ensureActiveSessionForProfile(profile.id);
       this.syncState();
     });
     vscode.window.onDidChangeActiveTextEditor(() => {
@@ -107,24 +122,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.syncState();
   }
 
-  /** 后台静默刷新远程 Claude 实时额度（0 Token，不弹终端） */
+  /** 后台静默刷新当前活跃 VPS 的 Claude 实时额度（0 Token，不弹终端） */
   public async refreshQuota(): Promise<void> {
     if (this.isRefreshingQuota) {
       return;
     }
     this.isRefreshingQuota = true;
     this.syncState();
+    const profileId = this.profiles.getActiveProfile().id;
     try {
       const partial = await this.claude.fetchQuota(getBridgeConfig());
-      if (partial) {
-        const prev = this.sessions.getQuota();
-        const merged: QuotaSnapshot = {
-          ...prev,
-          ...partial,
-          updatedAt: partial.updatedAt ?? Date.now(),
-        };
-        this.sessions.saveQuota(merged);
-      }
+        if (partial) {
+          const prev = this.sessions.getQuota(profileId);
+          const now = Date.now();
+          const merged: QuotaSnapshot = {
+            ...prev,
+            ...partial,
+            updatedAt: partial.updatedAt ?? now,
+          };
+          this.sessions.saveQuota(merged, profileId);
+          this.lastAutoQuotaAt = now;
+        }
     } finally {
       this.isRefreshingQuota = false;
       this.syncState();
@@ -157,10 +175,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const cfg = getBridgeConfig();
+    const activeProfile = this.profiles.getActiveProfile();
+    const allProfiles = this.profiles.listProfiles();
+    const allQuotas = this.sessions.getAllQuotas();
+    const profileNameMap = new Map(allProfiles.map((p) => [p.id, p.name]));
+
     const activeSession = this.sessions.getActiveSession();
-    const sessionSummaries = this.sessions.listSessions().map((s) => ({
+    const orderedSessions = this.sessions.listSessions();
+    const continuedSession = orderedSessions.find(
+      (s) => s.handoff?.sourceSessionId === activeSession.id
+    );
+    if (this.lastSyncedSessionId !== activeSession.id) {
+      this.lastSyncedSessionId = activeSession.id;
+      this.visibleMessageCount = 20;
+    }
+
+    const totalMessages = activeSession.messages.length;
+    const loadedStartIndex = Math.max(0, totalMessages - this.visibleMessageCount);
+    const slicedActiveSession = {
+      ...activeSession,
+      messages: activeSession.messages.slice(loadedStartIndex),
+    };
+
+    const activeProfileQuota = allQuotas[activeProfile.id] ?? null;
+    const sessionSummaries = orderedSessions.map((s) => ({
       id: s.id,
       title: s.title,
+      profileId: s.profileId || "default",
+      profileName: profileNameMap.get(s.profileId || "default") || "",
       updatedAt: s.updatedAt,
       messageCount: s.messages.length,
       hasRemoteSession: Boolean(s.claudeSessionId),
@@ -169,6 +211,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           (s.draftAttachments && s.draftAttachments.length > 0)
       ),
     }));
+
+    // 计算当前会话的「最近一次成功回复时间」与「上下文估算大小」，供前端展示缓存冷热预警
+    let effectiveLastReplyAt = activeSession.lastReplyAt ?? 0;
+    if (!effectiveLastReplyAt) {
+      for (let i = activeSession.messages.length - 1; i >= 0; i--) {
+        const m = activeSession.messages[i];
+        if (m.role === "assistant" && !m.meta?.isError && (m.text || "").trim()) {
+          effectiveLastReplyAt = m.timestamp;
+          break;
+        }
+      }
+    }
+    let effectiveContextTokens = activeSession.lastContextTokens ?? 0;
+    if (
+      !effectiveContextTokens &&
+      activeSession.messages.length >= 20 &&
+      activeProfileQuota?.lastContextTokens &&
+      sessionSummaries[0]?.id === activeSession.id
+    ) {
+      effectiveContextTokens = activeProfileQuota.lastContextTokens;
+    }
 
     const editor = vscode.window.activeTextEditor;
     let activeEditor:
@@ -201,14 +264,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         model: cfg.model,
         effort: cfg.effort,
         syncLocalRules: cfg.syncLocalRules,
-        quota: this.sessions.getQuota() ?? null,
+        activeProfile,
+        profiles: allProfiles.map((p) => ({
+          id: p.id,
+          name: p.name,
+          sshHost: p.sshHost,
+          quota5h: allQuotas[p.id]?.fiveHour
+            ? Math.round(allQuotas[p.id].fiveHour!.utilization * 100)
+            : null,
+        })),
+        quota: activeProfileQuota,
         isRefreshingQuota: this.isRefreshingQuota,
+        isHandingOff: this.isHandingOff,
+        sessionCacheInfo: {
+          lastReplyAt: effectiveLastReplyAt || null,
+          contextTokens: effectiveContextTokens || 0,
+          messageCount: activeSession.messages.length,
+          hasRemoteSession: Boolean(activeSession.claudeSessionId),
+        },
         workspacePath: getActiveWorkspacePath() ?? "",
         gitBadge: this.gitBadge ?? null,
         activeEditor,
         isRunning: this.claude.isRunning(),
+        streamingMessageId: this.streamingMessageId ?? null,
         attachments: activeSession.draftAttachments ?? [],
-        activeSession,
+        activeSession: slicedActiveSession,
+        totalMessageCount: totalMessages,
+        loadedStartIndex,
+        hasMoreOlder: loadedStartIndex > 0,
+        continuedToSession: continuedSession
+          ? { id: continuedSession.id, title: continuedSession.title }
+          : null,
         sessions: sessionSummaries,
       },
     });
@@ -223,6 +309,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "ready":
         void this.refreshGitBadge(false);
         this.syncState();
+        this.maybeAutoRefreshExpiredQuota();
         break;
 
       case "refreshGit":
@@ -284,10 +371,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.refreshQuota();
         break;
 
-      case "connect":
-        await this.bridge.connect(Boolean(msg.force));
+      case "connect": {
+        const ok = await this.bridge.connect(Boolean(msg.force));
+        if (ok) {
+          this.consecutiveFailures = 0;
+        }
         this.syncState();
         break;
+      }
+
+      case "switchProfile": {
+        const pid = String(msg.profileId ?? "");
+        if (!pid) {
+          return;
+        }
+        if (this.activeRun) {
+          this.activeRun.abort();
+          this.activeRun = undefined;
+        }
+        const switched = await this.profiles.switchProfile(pid);
+        if (switched) {
+          this.sessions.ensureActiveSessionForProfile(switched.id);
+          this.syncState();
+          await this.bridge.connect(true);
+          this.syncState();
+        }
+        break;
+      }
 
       case "disconnect":
         this.bridge.disconnect();
@@ -300,6 +410,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       case "openSettings":
         await vscode.commands.executeCommand("claudeBridge.openSettings");
+        break;
+
+      case "openSetupWizard":
+        await vscode.commands.executeCommand("claudeBridge.openSetupWizard");
         break;
 
       case "openLogFile":
@@ -332,7 +446,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.activeRun.abort();
           this.activeRun = undefined;
         }
-        this.sessions.createSession();
+        this.sessions.createSession(this.profiles.getActiveProfile().id);
+        this.visibleMessageCount = 20;
         this.syncState();
         break;
 
@@ -343,6 +458,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.activeRun = undefined;
         }
         this.sessions.setActiveSession(id);
+        this.visibleMessageCount = 20;
+        this.syncState();
+        break;
+      }
+
+      case "loadMoreMessages": {
+        const step = Math.max(10, Math.min(60, Number(msg.step) || 20));
+        const active = this.sessions.getActiveSession();
+        const prev = this.visibleMessageCount;
+        this.visibleMessageCount = Math.min(
+          active.messages.length,
+          this.visibleMessageCount + step
+        );
+        if (this.visibleMessageCount !== prev) {
+          this.syncState();
+        }
+        break;
+      }
+
+      case "jumpToMessage": {
+        const sid = String(msg.sessionId ?? "");
+        const mid = String(msg.messageId ?? "");
+        if (!sid) {
+          return;
+        }
+        if (this.activeRun && this.sessions.getActiveSession().id !== sid) {
+          this.activeRun.abort();
+          this.activeRun = undefined;
+        }
+        const targetSession = this.sessions.setActiveSession(sid);
+        if (!targetSession) {
+          return;
+        }
+        this.lastSyncedSessionId = targetSession.id;
+        const msgIdx = mid
+          ? targetSession.messages.findIndex((m) => m.id === mid)
+          : -1;
+        if (msgIdx >= 0) {
+          const needed = targetSession.messages.length - msgIdx + 6;
+          this.visibleMessageCount = Math.max(20, needed);
+        } else {
+          this.visibleMessageCount = 20;
+        }
         this.syncState();
         break;
       }
@@ -351,6 +509,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const id = String(msg.sessionId ?? "");
         this.sessions.deleteSession(id);
         this.syncState();
+        break;
+      }
+
+      case "searchHistory": {
+        const query = String(msg.query ?? "");
+        const allProfiles = this.profiles.listProfiles();
+        const profileNameMap = new Map(allProfiles.map((p) => [p.id, p.name]));
+        const hits = this.sessions.searchHistory(query, 36).map((h) => ({
+          ...h,
+          profileName: profileNameMap.get(h.profileId) || "",
+        }));
+        void this.view?.webview.postMessage({
+          type: "searchResults",
+          query,
+          hits,
+        });
+        break;
+      }
+
+      case "handoffSession": {
+        await this.handleHandoffToNewSession();
         break;
       }
 
@@ -403,27 +582,71 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.handleSendPrompt(text);
         break;
       }
+
+      case "retryMessage": {
+        const messageId = String(msg.messageId ?? "").trim();
+        if (!messageId) {
+          return;
+        }
+        await this.handleRetryMessage(messageId);
+        break;
+      }
     }
   }
 
   private async handleSendPrompt(userText: string): Promise<void> {
-    if (this.claude.isRunning()) {
+    if (this.claude.isRunning() || this.isHandingOff) {
       return;
     }
 
-    const bridgeState = this.bridge.getState();
-    if (bridgeState.status !== "connected") {
-      const ok = await this.bridge.connect(false);
-      if (!ok) {
-        vscode.window.showErrorMessage(
-          "ClaudeBridge 未连接成功，请先点击状态栏或设置中心检查连接状态。"
-        );
+    let session = this.sessions.getActiveSession();
+    const attachments = [...(session.draftAttachments ?? [])];
+
+    // 强保护：若当前是一个缓存已过期（>=58 分钟）的长会话，禁止直接冷启动续发，避免一发白烧 20%~30% 额度
+    if (this.isColdLongSession(session)) {
+      const choice = await vscode.window.showWarningMessage(
+        "这条老对话停了超过 1 小时，直接续聊会多扣很多 5 小时额度。是否先自动压缩记忆、新开对话再发送？",
+        { modal: true },
+        "压缩记忆并发送（推荐）",
+        "直接开空白新对话并发送"
+      );
+
+      if (!choice) {
+        // 用户取消：把刚输入的文字与附件完好无损还回输入框
+        session.draftText = userText;
+        session.draftAttachments = attachments;
+        this.sessions.save();
+        void this.view?.webview.postMessage({ type: "restoreDraft", text: userText });
+        this.syncState();
         return;
+      }
+
+      if (choice === "压缩记忆并发送（推荐）") {
+        // 暂存附件，压缩成功后自动迁入新会话并立刻发出；若失败再把文字还回输入框
+        session.draftText = "";
+        session.draftAttachments = attachments;
+        const ok = await this.handleHandoffToNewSession();
+        if (!ok) {
+          session.draftText = userText;
+          session.draftAttachments = attachments;
+          this.sessions.save();
+          void this.view?.webview.postMessage({ type: "restoreDraft", text: userText });
+          this.syncState();
+          return;
+        }
+        session = this.sessions.getActiveSession();
+      } else {
+        // 直接开空白新对话并带着刚输入的内容和附件发送
+        session.draftText = "";
+        session.draftAttachments = [];
+        const fresh = this.sessions.createSession(this.profiles.getActiveProfile().id);
+        fresh.draftAttachments = attachments;
+        this.visibleMessageCount = 20;
+        session = fresh;
       }
     }
 
-    const session = this.sessions.getActiveSession();
-    const attachments = [...(session.draftAttachments ?? [])];
+    const finalAttachments = [...(session.draftAttachments ?? attachments)];
     // 发送即清空已持久化的草稿与附件
     session.draftText = "";
     session.draftAttachments = [];
@@ -432,7 +655,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       id: `msg_${Date.now()}_u`,
       role: "user",
       text: userText || "请分析附件中的内容",
-      attachments: attachments.length > 0 ? attachments : undefined,
+      attachments: finalAttachments.length > 0 ? finalAttachments : undefined,
       timestamp: Date.now(),
     };
 
@@ -446,7 +669,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
 
     if (session.messages.length === 0) {
-      const cleanTitle = (userText || attachments[0]?.label || "新对话")
+      const cleanTitle = (userText || finalAttachments[0]?.label || "新对话")
         .replace(/\s+/g, " ")
         .trim();
       session.title =
@@ -454,10 +677,88 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     session.messages.push(userMsg, assistantMsg);
+    this.visibleMessageCount += 2;
     session.updatedAt = Date.now();
     this.sessions.save();
     this.syncState();
 
+    await this.executeAssistantTurn(session, userMsg, assistantMsg, 0);
+  }
+
+  /** 原地重试某条失败的助手回复（复用同一轮用户提问与附件，不产生重复气泡） */
+  private async handleRetryMessage(assistantMsgId: string): Promise<void> {
+    if (this.claude.isRunning()) {
+      return;
+    }
+
+    const session = this.sessions.getActiveSession();
+    const idx = session.messages.findIndex(
+      (m) => m.id === assistantMsgId && m.role === "assistant"
+    );
+    if (idx <= 0) {
+      return;
+    }
+
+    let userMsg: ChatMessage | undefined;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (session.messages[i].role === "user") {
+        userMsg = session.messages[i];
+        break;
+      }
+    }
+    if (!userMsg) {
+      return;
+    }
+
+    const assistantMsg = session.messages[idx];
+    const prevFailCount = Math.max(1, assistantMsg.meta?.failCount ?? 1);
+
+    // 清空上一轮失败内容，原地重新流式输出
+    assistantMsg.text = "";
+    assistantMsg.thinking = "";
+    assistantMsg.tools = [];
+    assistantMsg.meta = undefined;
+    assistantMsg.timestamp = Date.now();
+    session.updatedAt = Date.now();
+    this.sessions.save();
+    this.syncState();
+
+    await this.executeAssistantTurn(session, userMsg, assistantMsg, prevFailCount);
+  }
+
+  /** 执行单轮远程 Claude 调用，并统一维护失败计数与连续 3 次失败的连接刷新提醒 */
+  private async executeAssistantTurn(
+    session: ReturnType<SessionStore["getActiveSession"]>,
+    userMsg: ChatMessage,
+    assistantMsg: ChatMessage,
+    prevFailCount: number
+  ): Promise<void> {
+    const bridgeState = this.bridge.getState();
+    if (bridgeState.status !== "connected") {
+      const ok = await this.bridge.connect(false);
+      if (!ok) {
+        this.consecutiveFailures += 1;
+        const failCount = Math.max(prevFailCount + 1, this.consecutiveFailures);
+        assistantMsg.text = `执行失败：本地桥接未连接成功（${this.bridge.getState().detail || "请检查网络或代理设置"}）`;
+        assistantMsg.meta = { isError: true, failCount };
+        session.updatedAt = Date.now();
+        this.sessions.save();
+        this.syncState();
+        this.notifyIfRepeatedFailures(failCount);
+        return;
+      }
+    }
+
+    const activeProfile = this.profiles.getActiveProfile();
+    // 防止历史会话跨 VPS 复用无效的 --resume session_id
+    const sessionOwner = session.profileId || "default";
+    const canResumeRemote =
+      Boolean(session.claudeSessionId) && sessionOwner === activeProfile.id;
+    if (!session.claudeSessionId && session.messages.length <= 2) {
+      session.profileId = activeProfile.id;
+    }
+
+    const attachments = userMsg.attachments ?? [];
     const cfg = getBridgeConfig();
     let contextBlock: string | undefined;
     if (cfg.autoAttachWorkspaceContext) {
@@ -489,7 +790,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const fullPrompt = this.claude.buildPrompt(
       userMsg.text,
       attachments,
-      contextBlock
+      this.mergeHandoffIntoContext(session, contextBlock)
     );
 
     let lastPushAt = 0;
@@ -501,23 +802,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     };
 
+    this.streamingMessageId = assistantMsg.id;
+    let sawLiveFiveHourQuota = false;
     const handle = this.claude.runTurn({
       cfg,
       prompt: fullPrompt,
-      claudeSessionId: session.claudeSessionId,
+      claudeSessionId: canResumeRemote ? session.claudeSessionId : undefined,
       assistantMsg,
       callbacks: {
         onSessionId: (sid) => {
           session.claudeSessionId = sid;
+          session.profileId = activeProfile.id;
         },
         onQuota: (partial) => {
-          const prev = this.sessions.getQuota();
+          if (partial.fiveHour) {
+            sawLiveFiveHourQuota = true;
+            this.lastAutoQuotaAt = Date.now();
+          }
+          if (typeof partial.lastContextTokens === "number" && partial.lastContextTokens > 0) {
+            session.lastContextTokens = partial.lastContextTokens;
+          }
+          const prev = this.sessions.getQuota(activeProfile.id);
           const merged: QuotaSnapshot = {
             ...prev,
             ...partial,
             updatedAt: partial.updatedAt ?? Date.now(),
           };
-          this.sessions.saveQuota(merged);
+          this.sessions.saveQuota(merged, activeProfile.id);
           throttledSync(true);
         },
         onUpdate: () => {
@@ -531,10 +842,331 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.activeRun === handle) {
       this.activeRun = undefined;
     }
+    if (this.streamingMessageId === assistantMsg.id) {
+      this.streamingMessageId = undefined;
+    }
+
+    if (assistantMsg.meta?.isError) {
+      this.consecutiveFailures += 1;
+      const failCount = Math.max(prevFailCount + 1, this.consecutiveFailures);
+      assistantMsg.meta = {
+        ...assistantMsg.meta,
+        isError: true,
+        failCount,
+      };
+      this.notifyIfRepeatedFailures(failCount);
+    } else if (!assistantMsg.text.includes("_(已手动停止)_")) {
+      this.consecutiveFailures = 0;
+      session.lastReplyAt = Date.now();
+      if (session.handoff && !session.handoff.injected) {
+        session.handoff.injected = true;
+      }
+      if (assistantMsg.meta?.failCount) {
+        assistantMsg.meta = { ...assistantMsg.meta, failCount: undefined };
+      }
+    }
+
     session.updatedAt = Date.now();
     this.sessions.save();
     await this.refreshGitBadge(true);
     throttledSync(true);
+
+    // 若本轮流式回复未携带实时 5h 百分比，按 10 分钟冷却在后台静默查一次 0-Token /usage 自动更新
+    if (
+      !sawLiveFiveHourQuota &&
+      !assistantMsg.text.includes("_(已手动停止)_")
+    ) {
+      this.maybeAutoRefreshQuotaAfterTurn();
+    }
+  }
+
+  /** 连续失败达到 3 次时提醒用户刷新连接状况，并提供一键重连入口 */
+  private notifyIfRepeatedFailures(failCount: number): void {
+    if (failCount < 3) {
+      return;
+    }
+    void vscode.window
+      .showWarningMessage(
+        `ClaudeBridge 已连续失败 ${failCount} 次，可能是网络波动或代理变动导致连接异常，建议刷新连接状况。`,
+        "刷新连接状况"
+      )
+      .then(async (choice) => {
+        if (choice === "刷新连接状况") {
+          const ok = await this.bridge.connect(true);
+          if (ok) {
+            this.consecutiveFailures = 0;
+          }
+          this.syncState();
+        }
+      });
+  }
+
+  /** 将新会话尚未注入的交接摘要拼接到首轮上下文前缀中 */
+  private mergeHandoffIntoContext(
+    session: ReturnType<SessionStore["getActiveSession"]>,
+    contextBlock?: string
+  ): string | undefined {
+    if (!session.handoff || session.handoff.injected || session.claudeSessionId) {
+      return contextBlock;
+    }
+    const handoffHeader = [
+      `[Handoff context from archived session "${session.handoff.sourceSessionTitle}"]`,
+      session.handoff.summary,
+      "[End of handoff context — continue naturally based on the user's new message below]",
+    ].join("\n\n");
+    return contextBlock ? `${handoffHeader}\n\n${contextBlock}` : handoffHeader;
+  }
+
+  /**
+   * 压缩记忆并开新对话（由远程 Claude 总结；热缓存复用 1 折缓存，冷缓存自动剥离冗余由轻模型独立总结，绝不触发冷缓存大额扣费）
+   */
+  private async handleHandoffToNewSession(): Promise<boolean> {
+    if (this.claude.isRunning() || this.isHandingOff) {
+      return false;
+    }
+
+    const oldSession = this.sessions.getActiveSession();
+    if (oldSession.messages.length === 0) {
+      vscode.window.showInformationMessage("当前对话还没有可压缩的记录，直接开始提问即可。");
+      return false;
+    }
+
+    const activeProfile = this.profiles.getActiveProfile();
+
+    // 仅当 5h 利用率确实 >= 100% 且重置时间尚未到达时才提前拦截，避免被旧的 status 字段误杀
+    const quota = this.sessions.getQuota(activeProfile.id);
+    const resetSec = quota?.fiveHour?.resetsAt ?? 0;
+    const fiveHourUtil = quota?.fiveHour?.utilization ?? 0;
+    const stillLimited =
+      Boolean(quota?.fiveHour) &&
+      fiveHourUtil >= 1 &&
+      resetSec > 0 &&
+      resetSec * 1000 > Date.now();
+    if (stillLimited) {
+      vscode.window.showWarningMessage(
+        "当前 5 小时额度已用完，暂无法由 Claude 压缩记忆。你可以等额度重置后再压缩，或先点右上角「+」开空白新对话。"
+      );
+      return false;
+    }
+
+    if (this.bridge.getState().status !== "connected") {
+      const ok = await this.bridge.connect(false);
+      if (!ok) {
+        vscode.window.showWarningMessage(
+          "当前未连接到远程服务器，暂无法压缩记忆，请先刷新连接状况。"
+        );
+        return false;
+      }
+    }
+
+    const lastReplyAt = this.resolveSessionLastReplyAt(oldSession);
+    const idleMinutes = lastReplyAt
+      ? (Date.now() - lastReplyAt) / 60_000
+      : 999;
+    const canWarmResume =
+      idleMinutes < 55 &&
+      Boolean(oldSession.claudeSessionId) &&
+      (oldSession.profileId || "default") === activeProfile.id;
+
+    this.isHandingOff = true;
+    this.syncState();
+
+    try {
+      const res = canWarmResume && oldSession.claudeSessionId
+        ? await this.claude.generateHandoffSummary(getBridgeConfig(), {
+            mode: "warm-resume",
+            claudeSessionId: oldSession.claudeSessionId,
+          })
+        : await this.claude.generateHandoffSummary(getBridgeConfig(), {
+            mode: "cold-stateless",
+            transcript: this.buildCleanTranscriptForCompression(oldSession),
+          });
+
+      if (!res.ok || !res.summary) {
+        vscode.window.showWarningMessage(
+          res.reason || "压缩记忆失败，请稍后重试或直接开空白新对话。"
+        );
+        return false;
+      }
+
+      const oldTitle = (oldSession.title || "上一轮对话").replace(/^接续：/, "").trim();
+      const newSession = this.sessions.createSession(activeProfile.id);
+      const nextTitle = `接续：${oldTitle}`;
+      newSession.title =
+        nextTitle.length > 26 ? `${nextTitle.slice(0, 26)}...` : nextTitle;
+      newSession.handoff = {
+        sourceSessionId: oldSession.id,
+        sourceSessionTitle: oldSession.title || "上一轮对话",
+        summary: res.summary,
+        createdAt: Date.now(),
+        injected: false,
+      };
+      // 把老会话未发出的草稿一起带进新会话
+      if (oldSession.draftText && oldSession.draftText.trim()) {
+        newSession.draftText = oldSession.draftText;
+        oldSession.draftText = "";
+      }
+      if (oldSession.draftAttachments && oldSession.draftAttachments.length > 0) {
+        newSession.draftAttachments = [...oldSession.draftAttachments];
+        oldSession.draftAttachments = [];
+      }
+      this.visibleMessageCount = 20;
+      this.sessions.save();
+      this.maybeAutoRefreshQuotaAfterTurn();
+      return true;
+    } finally {
+      this.isHandingOff = false;
+      this.syncState();
+    }
+  }
+
+  /** 判断当前会话是否处于「缓存已失效且上下文较长」的高危扣费状态 */
+  private isColdLongSession(
+    session: ReturnType<SessionStore["getActiveSession"]>
+  ): boolean {
+    if (!session.claudeSessionId || session.messages.length < 10) {
+      return false;
+    }
+    const lastReplyAt = this.resolveSessionLastReplyAt(session);
+    if (!lastReplyAt) {
+      return false;
+    }
+    const idleMinutes = (Date.now() - lastReplyAt) / 60_000;
+    if (idleMinutes < 58) {
+      return false;
+    }
+    const activeProfile = this.profiles.getActiveProfile();
+    const quota = this.sessions.getQuota(activeProfile.id);
+    const tokens =
+      session.lastContextTokens ||
+      (session.messages.length >= 20 ? quota?.lastContextTokens ?? 0 : 0);
+    return tokens >= 100_000 || session.messages.length >= 20;
+  }
+
+  private resolveSessionLastReplyAt(
+    session: ReturnType<SessionStore["getActiveSession"]>
+  ): number {
+    if (session.lastReplyAt) {
+      return session.lastReplyAt;
+    }
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const m = session.messages[i];
+      if (m.role === "assistant" && !m.meta?.isError && (m.text || "").trim()) {
+        return m.timestamp;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * 为冷缓存脱壳压缩提取纯文本精华（剥离所有大段代码输出、日志与思考过程，控制在 ~1.5 万字符以内）
+   */
+  private buildCleanTranscriptForCompression(
+    session: ReturnType<SessionStore["getActiveSession"]>
+  ): string {
+    const touchedFiles = new Set<string>();
+    const cleanTurns: Array<{ user: string; assistant: string }> = [];
+    let pendingUser = "";
+
+    for (const m of session.messages) {
+      if (m.attachments) {
+        for (const a of m.attachments) {
+          if (a.filePath) {
+            touchedFiles.add(a.filePath);
+          }
+        }
+      }
+      if (m.tools) {
+        for (const t of m.tools) {
+          if (t.filePath) {
+            touchedFiles.add(t.filePath);
+          }
+        }
+      }
+      const txt = (m.text || "").trim();
+      if (!txt) {
+        continue;
+      }
+      if (m.role === "user") {
+        pendingUser = txt;
+      } else if (
+        m.role === "assistant" &&
+        !m.meta?.isError &&
+        !/^执行失败：|^启动远程 SSH 失败：|hit your 5-hour limit/i.test(txt)
+      ) {
+        if (pendingUser) {
+          cleanTurns.push({ user: pendingUser, assistant: txt });
+          pendingUser = "";
+        }
+      }
+    }
+
+    const parts: string[] = [];
+    if (session.handoff?.summary) {
+      parts.push(`[Earlier summary]\n${session.handoff.summary.slice(0, 1200)}`);
+    }
+    const files = Array.from(touchedFiles).slice(-16);
+    if (files.length > 0) {
+      parts.push(`[Touched files]\n${files.join("\n")}`);
+    }
+
+    // 取最近最多 16 轮有效问答，单轮适当控长，总长不超过 15,000 字符（远小于原 76 万 tokens）
+    const recent = cleanTurns.slice(-16);
+    const turnLines: string[] = [];
+    let budget = 14_000;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const q = recent[i].user.slice(0, 350);
+      const a = recent[i].assistant.slice(0, 900);
+      const block = `User: ${q}\nAssistant: ${a}`;
+      if (budget - block.length < 0 && turnLines.length >= 4) {
+        break;
+      }
+      turnLines.unshift(block);
+      budget -= block.length;
+    }
+    if (turnLines.length > 0) {
+      parts.push(`[Recent Q&A]\n${turnLines.join("\n\n")}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  /** 对话或压缩记忆完成后按 10 分钟冷却静默查一次额度，避免高频请求 /usage；手动刷新不受限制 */
+  private maybeAutoRefreshQuotaAfterTurn(): void {
+    if (this.isRefreshingQuota || this.bridge.getState().status !== "connected") {
+      return;
+    }
+    const now = Date.now();
+    if (
+      this.lastAutoQuotaAt > 0 &&
+      now - this.lastAutoQuotaAt < ChatViewProvider.AUTO_QUOTA_COOLDOWN_MS
+    ) {
+      return;
+    }
+    this.lastAutoQuotaAt = now;
+    void this.refreshQuota();
+  }
+
+  /** 当本地缓存的 5 小时重置时间已过时，后台静默刷一次额度让界面自动归零 */
+  private maybeAutoRefreshExpiredQuota(): void {
+    const now = Date.now();
+    if (now - this.lastAutoQuotaAt < 60_000) {
+      return;
+    }
+    if (this.bridge.getState().status !== "connected") {
+      return;
+    }
+    const activeProfile = this.profiles.getActiveProfile();
+    const quota = this.sessions.getQuota(activeProfile.id);
+    const resetSec = quota?.fiveHour?.resetsAt ?? 0;
+    if (
+      quota?.fiveHour &&
+      quota.fiveHour.utilization > 0 &&
+      resetSec > 0 &&
+      resetSec * 1000 <= now
+    ) {
+      this.lastAutoQuotaAt = now;
+      void this.refreshQuota();
+    }
   }
 
   private async openLocalFile(
@@ -717,6 +1349,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <span id="statusDot" class="dot"></span>
           <span id="statusText">连接中</span>
         </button>
+        <button id="searchHistoryBtn" class="icon-btn" title="搜索所有历史聊天记录">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </button>
         <button id="newChatBtn" class="icon-btn" title="新建对话">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M12 5v14M5 12h14"/>
@@ -737,8 +1375,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
     </header>
 
-    <div id="historyPopover" class="popover history-popover"></div>
+    <div id="historyPopover" class="popover history-popover">
+      <div class="history-search-wrap">
+        <svg class="history-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="historySearchInput" class="history-search-input" type="text" placeholder="搜历史记录，如 1444、文件名..." autocomplete="off" />
+        <button id="historySearchClear" class="history-search-clear" title="清空搜索" style="display:none;">×</button>
+      </div>
+      <div id="historyListBody" class="history-list-body"></div>
+    </div>
     <div id="quotaPopover" class="popover quota-popover"></div>
+    <div id="serverPopover" class="popover settings-popover"></div>
     <div id="settingsPopover" class="popover settings-popover"></div>
 
     <main id="messages" class="messages"></main>
@@ -747,6 +1396,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="modelPopover" class="popover menu-popover model-popover"></div>
 
     <footer class="composer-outer">
+      <div id="cacheAlertBar" class="cache-alert-bar" style="display:none;"></div>
       <div class="composer-card">
         <div id="composerContext" class="composer-context"></div>
         <textarea id="promptInput" placeholder="Ask Claude anything... (Enter 发送，Shift+Enter 换行)"></textarea>
@@ -762,6 +1412,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             </button>
           </div>
           <div class="composer-bar-right">
+            <button id="handoffBtn" class="icon-btn" title="压缩记忆并开新对话（由 Claude 总结当前进度，省额度）" style="display:none;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14"/>
+                <path d="M13 5l7 7-7 7"/>
+                <path d="M5 5v14"/>
+              </svg>
+            </button>
             <button id="attachBtn" class="icon-btn" title="引用当前文件或选中代码">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="4"/>

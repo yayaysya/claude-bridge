@@ -41,17 +41,46 @@ export interface ChatMessage {
     durationMs?: number;
     model?: string;
     isError?: boolean;
+    failCount?: number;
   };
   timestamp: number;
+}
+
+/** 新会话携带的上一轮记忆摘要（由 Claude 压缩记忆生成） */
+export interface SessionHandoffInfo {
+  sourceSessionId: string;
+  sourceSessionTitle: string;
+  summary: string;
+  createdAt: number;
+  injected?: boolean;
+}
+
+/** 本地跨会话历史搜索命中项 */
+export interface HistorySearchHit {
+  sessionId: string;
+  sessionTitle: string;
+  profileId: string;
+  messageId: string;
+  role: "user" | "assistant";
+  timestamp: number;
+  snippet: string;
 }
 
 /** 单个会话（与远程 Claude session_id 绑定，含草稿持久化，支持重载窗口与切换会话不丢失） */
 export interface ChatSession {
   id: string;
   title: string;
+  /** 归属的 VPS 档案 ID（旧会话缺省归属 default），防止跨机复用 --resume 报错 */
+  profileId?: string;
   claudeSessionId?: string;
   /** 最近一次已注入给该会话的工作区快照指纹，用于无变化时去重 */
   lastContextHash?: string;
+  /** 当前会话最近一次远程上下文估算大小（tokens），用于超长会话预警 */
+  lastContextTokens?: number;
+  /** 当前会话最近一次成功收到远程回复的时间戳（用于 1 小时缓存过期预警） */
+  lastReplyAt?: number;
+  /** 从旧会话交接过来的轻量进度摘要 */
+  handoff?: SessionHandoffInfo;
   /** 输入框中未发送的草稿文本（持久化，防重载窗口丢失） */
   draftText?: string;
   /** 输入框中已挂起但未发送的附件芯片 */
@@ -133,10 +162,10 @@ export class SessionStore {
   private activeSessionId: string | undefined;
   private workspacePath = "";
   private sessionFilePath = "";
-  private quota: QuotaSnapshot | undefined;
+  private quotasByProfile: Record<string, QuotaSnapshot> = {};
 
   constructor(private readonly state: vscode.Memento) {
-    this.quota = this.loadQuotaFromFile();
+    this.quotasByProfile = this.loadAllQuotasFromFile();
     this.switchWorkspace(getActiveWorkspacePath());
   }
 
@@ -184,6 +213,56 @@ export class SessionStore {
     return [...this.sessions].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  /** 纯本地跨会话全文搜索（0 网络、0 Token，支持空格分隔多关键词 AND 匹配） */
+  public searchHistory(rawQuery: string, maxResults = 36): HistorySearchHit[] {
+    const terms = rawQuery
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (terms.length === 0) {
+      return [];
+    }
+
+    const hits: HistorySearchHit[] = [];
+    const orderedSessions = this.listSessions();
+
+    for (const session of orderedSessions) {
+      const titleLower = (session.title || "").toLowerCase();
+      // 按时间倒序搜索消息，优先展示最新命中的记录
+      for (let i = session.messages.length - 1; i >= 0; i--) {
+        const msg = session.messages[i];
+        const rawText = (msg.text || "").trim();
+        if (!rawText) {
+          continue;
+        }
+        const attText = (msg.attachments ?? []).map((a) => a.label).join(" ");
+        const haystack = `${titleLower}\n${rawText.toLowerCase()}\n${attText.toLowerCase()}`;
+        const allMatched = terms.every((t) => haystack.includes(t));
+        if (!allMatched) {
+          continue;
+        }
+
+        const snippet = buildSearchSnippet(rawText, terms[0]);
+        hits.push({
+          sessionId: session.id,
+          sessionTitle: session.title || "未命名会话",
+          profileId: session.profileId || "default",
+          messageId: msg.id,
+          role: msg.role,
+          timestamp: msg.timestamp || session.updatedAt,
+          snippet,
+        });
+
+        if (hits.length >= maxResults) {
+          return hits;
+        }
+      }
+    }
+
+    return hits;
+  }
+
   public getActiveSession(): ChatSession {
     const found = this.sessions.find((s) => s.id === this.activeSessionId);
     if (found) {
@@ -206,11 +285,12 @@ export class SessionStore {
     return found;
   }
 
-  public createSession(): ChatSession {
+  public createSession(profileId?: string): ChatSession {
     const now = Date.now();
     const session: ChatSession = {
       id: `sess_${now}_${Math.random().toString(36).slice(2, 8)}`,
       title: "新对话",
+      profileId: profileId || "default",
       draftText: "",
       draftAttachments: [],
       createdAt: now,
@@ -224,6 +304,31 @@ export class SessionStore {
     this.activeSessionId = session.id;
     this.persistSessions();
     return session;
+  }
+
+  /** 切换 VPS 档案时，自动切换到该 VPS 在当前项目下的最近会话（没有则新建空白会话） */
+  public ensureActiveSessionForProfile(profileId: string): ChatSession {
+    const current = this.getActiveSession();
+    const currentOwner = current.profileId || "default";
+    // 若当前会话正好属于目标 VPS，或是尚未发过消息的空白新会话，直接归属并复用
+    if (currentOwner === profileId) {
+      return current;
+    }
+    if (current.messages.length === 0 && !current.claudeSessionId) {
+      current.profileId = profileId;
+      this.persistSessions();
+      return current;
+    }
+
+    const candidates = this.sessions
+      .filter((s) => (s.profileId || "default") === profileId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    if (candidates.length > 0) {
+      this.activeSessionId = candidates[0].id;
+      this.persistSessions();
+      return candidates[0];
+    }
+    return this.createSession(profileId);
   }
 
   public deleteSession(sessionId: string): ChatSession {
@@ -255,19 +360,28 @@ export class SessionStore {
     this.persistSessions();
   }
 
-  /** 读取共享额度文件（支持多窗口实时共享最新额度） */
-  public getQuota(): QuotaSnapshot | undefined {
-    const latest = this.loadQuotaFromFile();
-    if (latest) {
-      this.quota = latest;
-    }
-    return this.quota;
+  /** 读取指定 VPS 档案的最新额度（多窗口共享 quota.json，按 profileId 隔离） */
+  public getQuota(profileId = "default"): QuotaSnapshot | undefined {
+    this.quotasByProfile = this.loadAllQuotasFromFile();
+    return this.quotasByProfile[profileId];
   }
 
-  public saveQuota(quota: QuotaSnapshot): void {
-    this.quota = quota;
-    this.atomicWriteJson(QUOTA_FILE, quota);
-    void this.state.update(QUOTA_KEY, quota);
+  /** 读取所有 VPS 档案的额度映射（供切换服务器菜单直接预览每台机剩余额度） */
+  public getAllQuotas(): Record<string, QuotaSnapshot> {
+    this.quotasByProfile = this.loadAllQuotasFromFile();
+    return { ...this.quotasByProfile };
+  }
+
+  public saveQuota(quota: QuotaSnapshot, profileId = "default"): void {
+    this.quotasByProfile = this.loadAllQuotasFromFile();
+    this.quotasByProfile[profileId] = quota;
+    this.atomicWriteJson(QUOTA_FILE, {
+      version: 2,
+      byProfile: this.quotasByProfile,
+    });
+    if (profileId === "default") {
+      void this.state.update(QUOTA_KEY, quota);
+    }
   }
 
   private loadWorkspaceFile(
@@ -288,22 +402,31 @@ export class SessionStore {
     }
   }
 
-  private loadQuotaFromFile(): QuotaSnapshot | undefined {
+  private loadAllQuotasFromFile(): Record<string, QuotaSnapshot> {
     try {
       if (fs.existsSync(QUOTA_FILE)) {
         const raw = fs.readFileSync(QUOTA_FILE, "utf8");
-        const parsed = JSON.parse(raw) as QuotaSnapshot;
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (
+          parsed &&
+          parsed.version === 2 &&
+          parsed.byProfile &&
+          typeof parsed.byProfile === "object"
+        ) {
+          return { ...(parsed.byProfile as Record<string, QuotaSnapshot>) };
+        }
+        // 兼容旧版单对象 quota.json，自动归属 default
         if (parsed && typeof parsed.updatedAt === "number") {
-          return parsed;
+          return { default: parsed as unknown as QuotaSnapshot };
         }
       }
     } catch {
       // 忽略损坏文件并回退
     }
-    return (
+    const fallback =
       this.state.get<QuotaSnapshot>(QUOTA_KEY) ??
-      this.state.get<QuotaSnapshot>(LEGACY_QUOTA_KEY)
-    );
+      this.state.get<QuotaSnapshot>(LEGACY_QUOTA_KEY);
+    return fallback ? { default: fallback } : {};
   }
 
   /** 将旧版未分项目的 sessions.json 精准迁移给匹配的工作区一次，防止串台到其他新项目 */
@@ -370,4 +493,18 @@ export class SessionStore {
       // 文件写入异常不影响主流程
     }
   }
+}
+
+/** 围绕首个命中关键词截取前后文摘要，便于快速确认是不是要找的那条记录 */
+function buildSearchSnippet(rawText: string, firstTerm: string): string {
+  const clean = rawText.replace(/\s+/g, " ").trim();
+  const idx = clean.toLowerCase().indexOf(firstTerm);
+  if (idx < 0) {
+    return clean.length > 110 ? `${clean.slice(0, 110)}...` : clean;
+  }
+  const start = Math.max(0, idx - 32);
+  const end = Math.min(clean.length, idx + firstTerm.length + 76);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < clean.length ? "..." : "";
+  return `${prefix}${clean.slice(start, end)}${suffix}`;
 }

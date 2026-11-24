@@ -6,6 +6,19 @@ import { Marked, Renderer } from "marked";
   let openPopover = null; // "history" | "quota" | "settings" | "perm" | "model" | null
   let lastLoadedSessionId = null;
   let draftSaveTimer = null;
+  let historySearchQuery = "";
+  let historySearchHits = [];
+  let historySearchTimer = null;
+  let pendingJumpMessageId = null;
+  let dismissedAlertKey = "";
+  let isLoadingOlder = false;
+  let scrollAnchor = null;
+  let suppressAutoLoadUntil = 0;
+  let lastRenderedListKey = "";
+  let lastRenderedSessionId = "";
+  let lastRenderedStartIndex = 0;
+  let lastRenderedCount = 0;
+  const renderedMsgCache = new Map();
 
   function escapeHtml(str) {
     return String(str ?? "")
@@ -180,7 +193,14 @@ import { Marked, Renderer } from "marked";
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
   const historyPopover = document.getElementById("historyPopover");
+  const historySearchInput = document.getElementById("historySearchInput");
+  const historySearchClear = document.getElementById("historySearchClear");
+  const historyListBody = document.getElementById("historyListBody");
+  const searchHistoryBtn = document.getElementById("searchHistoryBtn");
+  const cacheAlertBar = document.getElementById("cacheAlertBar");
+  const handoffBtn = document.getElementById("handoffBtn");
   const quotaPopover = document.getElementById("quotaPopover");
+  const serverPopover = document.getElementById("serverPopover");
   const settingsPopover = document.getElementById("settingsPopover");
   const permPopover = document.getElementById("permPopover");
   const modelPopover = document.getElementById("modelPopover");
@@ -262,6 +282,7 @@ import { Marked, Renderer } from "marked";
     openPopover = openPopover === name ? null : name;
     historyPopover.classList.toggle("open", openPopover === "history");
     quotaPopover.classList.toggle("open", openPopover === "quota");
+    serverPopover.classList.toggle("open", openPopover === "server");
     settingsPopover.classList.toggle("open", openPopover === "settings");
     permPopover.classList.toggle("open", openPopover === "perm");
     modelPopover.classList.toggle("open", openPopover === "model");
@@ -272,6 +293,7 @@ import { Marked, Renderer } from "marked";
     openPopover = null;
     historyPopover.classList.remove("open");
     quotaPopover.classList.remove("open");
+    serverPopover.classList.remove("open");
     settingsPopover.classList.remove("open");
     permPopover.classList.remove("open");
     modelPopover.classList.remove("open");
@@ -282,7 +304,9 @@ import { Marked, Renderer } from "marked";
     if (
       target.closest(".popover") ||
       target.closest("#sessionTrigger") ||
+      target.closest("#searchHistoryBtn") ||
       target.closest("#quotaBtn") ||
+      target.closest("#statusBtn") ||
       target.closest("#settingsBtn") ||
       target.closest("#permBtn") ||
       target.closest("#modelBtn")
@@ -292,7 +316,96 @@ import { Marked, Renderer } from "marked";
     closePopovers();
   });
 
-  sessionTrigger.addEventListener("click", () => togglePopover("history"));
+  sessionTrigger.addEventListener("click", () => {
+    togglePopover("history");
+    if (openPopover === "history" && historySearchInput && historySearchQuery) {
+      historySearchInput.focus();
+    }
+  });
+
+  if (searchHistoryBtn) {
+    searchHistoryBtn.addEventListener("click", () => {
+      if (openPopover !== "history") {
+        togglePopover("history");
+      }
+      if (historySearchInput) {
+        historySearchInput.focus();
+        historySearchInput.select();
+      }
+    });
+  }
+
+  if (historySearchInput) {
+    historySearchInput.addEventListener("input", () => {
+      historySearchQuery = historySearchInput.value.trim();
+      if (historySearchClear) {
+        historySearchClear.style.display = historySearchQuery ? "inline-flex" : "none";
+      }
+      if (historySearchTimer) clearTimeout(historySearchTimer);
+      if (!historySearchQuery) {
+        historySearchHits = [];
+        if (currentState) renderHistoryBody(currentState);
+        return;
+      }
+      historySearchTimer = setTimeout(() => {
+        vscode.postMessage({ type: "searchHistory", query: historySearchQuery });
+      }, 130);
+    });
+
+    historySearchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (historySearchQuery) {
+          historySearchInput.value = "";
+          historySearchQuery = "";
+          historySearchHits = [];
+          if (historySearchClear) historySearchClear.style.display = "none";
+          if (currentState) renderHistoryBody(currentState);
+        } else {
+          closePopovers();
+        }
+      }
+    });
+  }
+
+  if (historySearchClear) {
+    historySearchClear.addEventListener("click", () => {
+      if (historySearchInput) {
+        historySearchInput.value = "";
+        historySearchInput.focus();
+      }
+      historySearchQuery = "";
+      historySearchHits = [];
+      historySearchClear.style.display = "none";
+      if (currentState) renderHistoryBody(currentState);
+    });
+  }
+
+  if (handoffBtn) {
+    handoffBtn.addEventListener("click", () => {
+      if (!currentState || currentState.isRunning || currentState.isHandingOff) return;
+      flushDraftNow();
+      vscode.postMessage({ type: "handoffSession" });
+    });
+  }
+
+  // 微信式上滑自动加载更早聊天记录（滑近顶部自动静默加载并锚定阅读位置，不跳屏）
+  messagesEl.addEventListener("scroll", () => {
+    if (!currentState || !currentState.hasMoreOlder || isLoadingOlder) return;
+    if (Date.now() < suppressAutoLoadUntil) return;
+    if (messagesEl.scrollHeight <= messagesEl.clientHeight + 80) return;
+    if (messagesEl.scrollTop < 120) {
+      isLoadingOlder = true;
+      scrollAnchor = {
+        prevHeight: messagesEl.scrollHeight,
+        prevTop: messagesEl.scrollTop,
+      };
+      const sentinel = messagesEl.querySelector(".older-sentinel");
+      if (sentinel) {
+        sentinel.textContent = "正在加载更早记录...";
+      }
+      vscode.postMessage({ type: "loadMoreMessages", step: 20 });
+    }
+  });
   quotaBtn.addEventListener("click", () => {
     togglePopover("quota");
     if (openPopover === "quota" && (!currentState || !currentState.quota)) {
@@ -303,8 +416,7 @@ import { Marked, Renderer } from "marked";
   modelBtn.addEventListener("click", () => togglePopover("model"));
 
   statusBtn.addEventListener("click", () => {
-    const isConnected = currentState && currentState.bridge && currentState.bridge.status === "connected";
-    vscode.postMessage({ type: "connect", force: Boolean(isConnected) });
+    togglePopover("server");
   });
 
   document.getElementById("newChatBtn").addEventListener("click", () => {
@@ -409,11 +521,31 @@ import { Marked, Renderer } from "marked";
 
   window.addEventListener("message", (event) => {
     const msg = event.data;
-    if (msg && msg.type === "state") {
+    if (!msg) return;
+    if (msg.type === "state") {
       currentState = msg.payload;
       render(currentState);
+    } else if (msg.type === "restoreDraft") {
+      promptInput.value = msg.text || "";
+      autoResize();
+      updateSendVisual();
+      promptInput.focus();
+    } else if (msg.type === "searchResults") {
+      if ((msg.query || "").trim() === historySearchQuery) {
+        historySearchHits = Array.isArray(msg.hits) ? msg.hits : [];
+        if (currentState) {
+          renderHistoryBody(currentState);
+        }
+      }
     }
   });
+
+  // 每 30 秒刷新一次缓存冷热预警条，午休回来不动键盘也会自动亮起防踩坑提示
+  setInterval(() => {
+    if (currentState) {
+      renderCacheAlert(currentState);
+    }
+  }, 30000);
 
   function shortPath(fullPath, workspacePath) {
     if (!fullPath) return "";
@@ -593,6 +725,12 @@ import { Marked, Renderer } from "marked";
       '<span class="setting-row-title">打开可视化设置中心...</span>' +
       '<span class="setting-row-desc">服务器、代理、测试连接、规则与记忆</span>' +
       "</div>" +
+      "</div>" +
+      '<div class="setting-row" id="openWizardRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">新机配置向导 (一键部署)</span>' +
+      '<span class="setting-row-desc">4 步初始化新 VPS 与网页临时登录画面</span>' +
+      "</div>" +
       "</div>";
 
     const openLocalRow = document.getElementById("openLocalRulesRow");
@@ -629,31 +767,197 @@ import { Marked, Renderer } from "marked";
         vscode.postMessage({ type: "openSettings" });
       });
     }
+    const openWizardRow = document.getElementById("openWizardRow");
+    if (openWizardRow) {
+      openWizardRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openSetupWizard" });
+      });
+    }
   }
 
-  function renderPopovers(state) {
-    renderQuotaPopover(state);
-    renderSettingsPopover(state);
-    // 1. 历史会话
+  function renderServerPopover(state) {
+    const profiles = state.profiles || [];
+    const activeId = (state.activeProfile && state.activeProfile.id) || "default";
+    const listHtml = profiles
+      .map((p) => {
+        const selected = p.id === activeId;
+        const quotaBadge =
+          typeof p.quota5h === "number" ? " · 5h " + p.quota5h + "%" : "";
+        const desc = (p.sshHost || "未配置 IP") + quotaBadge;
+        return (
+          '<div class="menu-option ' + (selected ? "selected" : "") + '" data-switch-profile="' + escapeHtml(p.id) + '">' +
+          '<div class="menu-opt-text">' +
+          '<span class="menu-opt-title">' + escapeHtml(p.name) + "</span>" +
+          '<span class="menu-opt-desc">' + escapeHtml(desc) + "</span>" +
+          "</div>" +
+          '<span class="menu-check">' + (selected ? "✓" : "") + "</span>" +
+          "</div>"
+        );
+      })
+      .join("");
+
+    serverPopover.innerHTML =
+      '<div class="popover-header"><span>切换远程服务器</span><span>' + profiles.length + "</span></div>" +
+      listHtml +
+      '<div class="popover-divider"></div>' +
+      '<div class="setting-row" id="srvReconnectRow"><div class="setting-row-text"><span class="setting-row-title">刷新重连当前服务器</span></div></div>' +
+      '<div class="setting-row" id="srvManageRow"><div class="setting-row-text"><span class="setting-row-title">管理 / 新增服务器...</span></div></div>';
+
+    serverPopover.querySelectorAll("[data-switch-profile]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const pid = el.dataset.switchProfile;
+        closePopovers();
+        if (pid && pid !== activeId) {
+          flushDraftNow();
+          vscode.postMessage({ type: "switchProfile", profileId: pid });
+        }
+      });
+    });
+
+    const reconRow = document.getElementById("srvReconnectRow");
+    if (reconRow) {
+      reconRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "connect", force: true });
+      });
+    }
+    const manageRow = document.getElementById("srvManageRow");
+    if (manageRow) {
+      manageRow.addEventListener("click", () => {
+        closePopovers();
+        vscode.postMessage({ type: "openSettings" });
+      });
+    }
+  }
+
+  function formatShortTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    return mm + "-" + dd + " " + hh + ":" + mi;
+  }
+
+  function highlightSearchSnippet(snippet, query) {
+    const escaped = escapeHtml(snippet || "");
+    const terms = (query || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    if (!terms.length) return escaped;
+    const pattern = terms
+      .map((t) => escapeHtml(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    try {
+      return escaped.replace(
+        new RegExp("(" + pattern + ")", "gi"),
+        '<mark class="search-mark">$1</mark>'
+      );
+    } catch {
+      return escaped;
+    }
+  }
+
+  function jumpToMessageById(msgId) {
+    if (!msgId) return false;
+    const all = messagesEl.querySelectorAll("[data-msg-id]");
+    let targetEl = null;
+    for (const el of all) {
+      if (el.dataset.msgId === msgId) {
+        targetEl = el;
+        break;
+      }
+    }
+    if (!targetEl) return false;
+    targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    targetEl.classList.remove("msg-jump-highlight");
+    void targetEl.offsetWidth;
+    targetEl.classList.add("msg-jump-highlight");
+    setTimeout(() => {
+      targetEl.classList.remove("msg-jump-highlight");
+    }, 2600);
+    return true;
+  }
+
+  function renderHistoryBody(state) {
+    if (!historyListBody) return;
+    const showProfileTag = (state.profiles || []).length > 1;
+
+    if (historySearchQuery) {
+      if (!historySearchHits.length) {
+        historyListBody.innerHTML =
+          '<div class="popover-header"><span>搜索结果</span><span>0 条</span></div>' +
+          '<div class="history-empty">没有找到包含「' + escapeHtml(historySearchQuery) + "」的历史记录，换个关键词试试。</div>";
+        return;
+      }
+      const hitsHtml = historySearchHits
+        .map((h) => {
+          const roleLabel = h.role === "user" ? "我" : "Claude";
+          const roleCls = h.role === "user" ? "user" : "assistant";
+          const metaParts = [h.sessionTitle];
+          if (showProfileTag && h.profileName) metaParts.push(h.profileName);
+          if (h.timestamp) metaParts.push(formatShortTime(h.timestamp));
+          return (
+            '<div class="search-hit-item" data-hit-sid="' + escapeHtml(h.sessionId) + '" data-hit-mid="' + escapeHtml(h.messageId) + '">' +
+            '<div class="search-hit-meta">' +
+            '<span class="search-hit-role ' + roleCls + '">' + roleLabel + "</span>" +
+            '<span class="search-hit-session">' + escapeHtml(metaParts.join(" · ")) + "</span>" +
+            "</div>" +
+            '<div class="search-hit-snippet">' + highlightSearchSnippet(h.snippet, historySearchQuery) + "</div>" +
+            "</div>"
+          );
+        })
+        .join("");
+
+      historyListBody.innerHTML =
+        '<div class="popover-header"><span>跨会话搜索结果（点一条直达原文）</span><span>' + historySearchHits.length + " 条</span></div>" +
+        hitsHtml;
+
+      historyListBody.querySelectorAll("[data-hit-sid]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const sid = el.dataset.hitSid;
+          const mid = el.dataset.hitMid;
+          closePopovers();
+          if (sid && state.activeSession && sid === state.activeSession.id && jumpToMessageById(mid)) {
+            return;
+          }
+          if (sid) {
+            pendingJumpMessageId = mid || null;
+            flushDraftNow();
+            vscode.postMessage({ type: "jumpToMessage", sessionId: sid, messageId: mid });
+          }
+        });
+      });
+      return;
+    }
+
     const listHtml = (state.sessions || [])
       .map((s) => {
         const isActive = s.id === state.activeSession.id;
+        const subParts = [];
+        if (showProfileTag && s.profileName) subParts.push(s.profileName);
+        subParts.push(s.messageCount + " 条消息");
+        if (s.updatedAt) subParts.push(formatShortTime(s.updatedAt));
         return (
           '<div class="history-item ' + (isActive ? "active" : "") + '" data-sid="' + escapeHtml(s.id) + '">' +
           '<div class="history-main">' +
           '<span class="history-title">' + escapeHtml(s.title) + "</span>" +
-          '<span class="history-sub">' + s.messageCount + " 条消息</span>" +
+          '<span class="history-sub">' + escapeHtml(subParts.join(" · ")) + "</span>" +
           "</div>" +
           '<button class="history-del" data-del="' + escapeHtml(s.id) + '" title="删除会话">×</button>' +
           "</div>"
         );
       })
       .join("");
-    historyPopover.innerHTML =
-      '<div class="popover-header"><span>最近会话</span><span>' + (state.sessions || []).length + "</span></div>" +
+    historyListBody.innerHTML =
+      '<div class="popover-header"><span>最近会话（上方可搜全部聊天内容）</span><span>' + (state.sessions || []).length + "</span></div>" +
       listHtml;
 
-    historyPopover.querySelectorAll("[data-sid]").forEach((el) => {
+    historyListBody.querySelectorAll("[data-sid]").forEach((el) => {
       el.addEventListener("click", (e) => {
         if (e.target && e.target.closest("[data-del]")) return;
         flushDraftNow();
@@ -661,12 +965,157 @@ import { Marked, Renderer } from "marked";
         closePopovers();
       });
     });
-    historyPopover.querySelectorAll("[data-del]").forEach((btn) => {
+    historyListBody.querySelectorAll("[data-del]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         vscode.postMessage({ type: "deleteSession", sessionId: btn.dataset.del });
       });
     });
+  }
+
+  function formatIdleDuration(minutes) {
+    if (minutes < 60) return minutes + " 分钟";
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return m > 0 ? h + " 小时 " + m + " 分钟" : h + " 小时";
+  }
+
+  function formatContextScale(tokens, msgCount) {
+    if (tokens >= 10000) {
+      return "约 " + Math.round(tokens / 10000) + " 万 tokens · " + msgCount + " 条消息";
+    }
+    return msgCount + " 条消息";
+  }
+
+  function renderCacheAlert(state) {
+    if (!cacheAlertBar) return;
+
+    if (state.isHandingOff) {
+      cacheAlertBar.className = "cache-alert-bar info";
+      cacheAlertBar.style.display = "flex";
+      cacheAlertBar.innerHTML =
+        '<div class="cache-alert-text">' +
+        '<div class="cache-alert-title"><span class="streaming-star">' + ICON_STAR_SM + "</span><span>Claude 正在压缩记忆并创建新对话...</span></div>" +
+        '<div class="cache-alert-desc">原对话会安全保存在历史记录中，顶部 🔍 随时可搜索回看。</div>' +
+        "</div>";
+      return;
+    }
+
+    // 若当前查看的是已经压缩记忆过的原对话，直接提供一键「回到新对话 →」，不再催促重复压缩
+    if (state.continuedToSession && state.continuedToSession.id) {
+      const target = state.continuedToSession;
+      cacheAlertBar.className = "cache-alert-bar info";
+      cacheAlertBar.style.display = "flex";
+      cacheAlertBar.innerHTML =
+        '<div class="cache-alert-text">' +
+        '<div class="cache-alert-title">已压缩记忆并接续到「' + escapeHtml(target.title) + "」</div>" +
+        '<div class="cache-alert-desc">你可以放心在此翻看原对话记录，随时点右侧一键回到新对话继续聊。</div>' +
+        "</div>" +
+        '<div class="cache-alert-actions">' +
+        '<button class="cache-handoff-btn danger" id="backToContinuedBtn">回到新对话 →</button>' +
+        "</div>";
+      const backBtn = document.getElementById("backToContinuedBtn");
+      if (backBtn) {
+        backBtn.addEventListener("click", () => {
+          flushDraftNow();
+          vscode.postMessage({ type: "selectSession", sessionId: target.id });
+        });
+      }
+      return;
+    }
+
+    const info = state.sessionCacheInfo || {};
+    const sid = (state.activeSession && state.activeSession.id) || "";
+    const msgCount = info.messageCount || 0;
+    const tokens = info.contextTokens || 0;
+    const lastReplyAt = info.lastReplyAt || 0;
+
+    if (state.isRunning || msgCount < 6 || !lastReplyAt) {
+      cacheAlertBar.style.display = "none";
+      return;
+    }
+
+    const idleMin = Math.max(0, Math.floor((Date.now() - lastReplyAt) / 60000));
+    const sizeDesc = formatContextScale(tokens, msgCount);
+
+    let level = "";
+    let title = "";
+    let desc = "";
+    let actionsHtml = "";
+
+    if (idleMin >= 58 && (tokens >= 100000 || msgCount >= 20)) {
+      level = "danger";
+      title = "对话停了超过 1 小时，建议先压缩记忆再继续";
+      desc = "本对话较长（" + msgCount + " 条记录），直接续聊会多扣不少 5 小时额度。点右侧一键压缩记忆开新对话，不丢进度又省额度。";
+      actionsHtml =
+        '<button class="cache-handoff-btn danger" id="cacheHandoffBtn">压缩记忆并开新对话</button>' +
+        '<button class="cache-handoff-btn ghost" id="cacheNewChatBtn">开空白新对话</button>';
+    } else if (idleMin >= 45 && idleMin < 58 && (tokens >= 120000 || msgCount >= 24)) {
+      level = "warn";
+      title = "对话较长，建议现在压缩记忆更省额度";
+      desc = "本对话已有 " + msgCount + " 条记录，点右侧一键总结进度并开新对话，原记录随时可搜。";
+      actionsHtml =
+        '<button class="cache-handoff-btn warn" id="cacheHandoffBtn">压缩记忆并开新对话</button>';
+    } else if (idleMin < 45 && (tokens >= 250000 || msgCount >= 50)) {
+      level = "info";
+      title = "本次对话已较长（" + msgCount + " 条记录）";
+      desc = "对话越长越费额度，做完手头小目标后可一键压缩记忆开新对话，原记录随时可搜。";
+      actionsHtml =
+        '<button class="cache-handoff-btn info" id="cacheHandoffBtn">压缩记忆并开新对话</button>';
+    }
+
+    if (!level) {
+      cacheAlertBar.style.display = "none";
+      return;
+    }
+
+    const alertKey = sid + ":" + level + ":" + lastReplyAt;
+    if (dismissedAlertKey === alertKey) {
+      cacheAlertBar.style.display = "none";
+      return;
+    }
+
+    cacheAlertBar.className = "cache-alert-bar " + level;
+    cacheAlertBar.style.display = "flex";
+    cacheAlertBar.innerHTML =
+      '<div class="cache-alert-text">' +
+      '<div class="cache-alert-title">' + escapeHtml(title) + "</div>" +
+      '<div class="cache-alert-desc">' + escapeHtml(desc) + "</div>" +
+      "</div>" +
+      '<div class="cache-alert-actions">' +
+      actionsHtml +
+      '<button class="cache-dismiss-btn" id="cacheDismissBtn" title="暂时收起提示">×</button>' +
+      "</div>";
+
+    const newChatQuick = document.getElementById("cacheNewChatBtn");
+    if (newChatQuick) {
+      newChatQuick.addEventListener("click", () => {
+        flushDraftNow();
+        vscode.postMessage({ type: "newSession" });
+      });
+    }
+    const btn = document.getElementById("cacheHandoffBtn");
+    if (btn) {
+      btn.addEventListener("click", () => {
+        flushDraftNow();
+        vscode.postMessage({ type: "handoffSession" });
+      });
+    }
+    const dismiss = document.getElementById("cacheDismissBtn");
+    if (dismiss) {
+      dismiss.addEventListener("click", () => {
+        dismissedAlertKey = alertKey;
+        cacheAlertBar.style.display = "none";
+      });
+    }
+  }
+
+  function renderPopovers(state) {
+    renderQuotaPopover(state);
+    renderServerPopover(state);
+    renderSettingsPopover(state);
+    // 1. 历史会话与跨会话全文搜索
+    renderHistoryBody(state);
 
     // 2. 权限弹出菜单
     permPopover.innerHTML = PERM_OPTIONS.map((opt) => {
@@ -765,9 +1214,11 @@ import { Marked, Renderer } from "marked";
     sessionTitleText.textContent = (state.activeSession && state.activeSession.title) || "新对话";
 
     const st = state.bridge.status;
+    const pName = (state.activeProfile && state.activeProfile.name) || "";
+    const hasMulti = (state.profiles || []).length > 1;
     statusDot.className = "dot " + st;
     if (st === "connected") {
-      statusText.textContent = "已连接";
+      statusText.textContent = hasMulti && pName ? pName : "已连接";
     } else if (st === "connecting") {
       statusText.textContent = "连接中...";
     } else if (st === "error") {
@@ -775,7 +1226,8 @@ import { Marked, Renderer } from "marked";
     } else {
       statusText.textContent = "未连接";
     }
-    statusBtn.title = (state.bridge.detail || "") + "（点击重连）";
+    statusBtn.title =
+      (pName ? pName + " · " : "") + (state.bridge.detail || "") + "（点击切换服务器或重连）";
 
     // 底部权限/模型胶囊
     const activePerm = PERM_OPTIONS.find((p) => p.value === state.permissionMode) || PERM_OPTIONS[0];
@@ -790,6 +1242,15 @@ import { Marked, Renderer } from "marked";
 
     updateSendVisual();
     renderPopovers(state);
+    renderCacheAlert(state);
+
+    const msgs = (state.activeSession && state.activeSession.messages) || [];
+    const totalCount =
+      typeof state.totalMessageCount === "number" ? state.totalMessageCount : msgs.length;
+    if (handoffBtn) {
+      handoffBtn.style.display = totalCount >= 4 ? "inline-flex" : "none";
+      handoffBtn.disabled = Boolean(state.isRunning || state.isHandingOff);
+    }
 
     // 输入框顶部：当前项目与 Git 分支徽标 + 附件芯片 + 当前活动文件一键引用
     let ctxHtml = "";
@@ -866,12 +1327,57 @@ import { Marked, Renderer } from "marked";
       });
     });
 
-    // 消息区
+    // 消息区：单条缓存 + 流式局部更新 + 微信式上滑自动加载定位锚定
     const shouldStickBottom =
       messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
 
-    const msgs = (state.activeSession && state.activeSession.messages) || [];
+    const handoff = state.activeSession && state.activeSession.handoff;
+    const renderHandoffCard = (expanded) => {
+      if (!handoff) return "";
+      return (
+        '<details class="handoff-card"' + (expanded ? " open" : "") + ">" +
+        '<summary class="handoff-card-head">' +
+        '<span class="handoff-card-title">' + ICON_STAR_SM + " 已压缩记忆，接续「" + escapeHtml(handoff.sourceSessionTitle) + "」</span>" +
+        '<span class="handoff-card-right">' +
+        '<span class="handoff-mode-tag">记忆摘要</span>' +
+        '<button type="button" class="handoff-source-btn" data-jump-session="' + escapeHtml(handoff.sourceSessionId) + '" title="切回上一轮完整原对话">查看原对话 →</button>' +
+        "</span>" +
+        "</summary>" +
+        '<div class="handoff-card-body md">' + renderMarkdown(handoff.summary) + "</div>" +
+        '<div class="handoff-card-foot">直接发消息即可，第一句会自动带上这份记忆摘要；原对话已保存，点顶部 🔍 随时可搜。</div>' +
+        "</details>"
+      );
+    };
+
+    const curSid = (state.activeSession && state.activeSession.id) || "";
+    const startIdx = typeof state.loadedStartIndex === "number" ? state.loadedStartIndex : 0;
+    const hasMoreOlder = Boolean(state.hasMoreOlder);
+    const isSessionSwitchOrInit = curSid !== lastRenderedSessionId;
+
+    if (isSessionSwitchOrInit) {
+      isLoadingOlder = false;
+      scrollAnchor = null;
+      lastRenderedListKey = "";
+      suppressAutoLoadUntil = Date.now() + 500;
+    }
+
     if (msgs.length === 0) {
+      lastRenderedSessionId = curSid;
+      lastRenderedStartIndex = 0;
+      lastRenderedCount = 0;
+      lastRenderedListKey = "";
+      isLoadingOlder = false;
+      scrollAnchor = null;
+
+      if (handoff) {
+        messagesEl.innerHTML =
+          '<div class="handoff-empty-wrap">' +
+          renderHandoffCard(true) +
+          "</div>";
+        bindMessageInteractions(messagesEl);
+        return;
+      }
+
       const wsName = state.workspacePath ? state.workspacePath.split("/").pop() : "未打开工作区";
       let wsInner = "<span>" + escapeHtml(wsName) + "</span>";
       if (gb && gb.isGitRepo && gb.branch) {
@@ -904,11 +1410,141 @@ import { Marked, Renderer } from "marked";
       return;
     }
 
-    messagesEl.innerHTML = msgs
-      .map((m, idx) => renderMessage(m, idx === msgs.length - 1 && state.isRunning, state.workspacePath))
-      .join("");
+    const streamingId = state.isRunning
+      ? state.streamingMessageId || msgs[msgs.length - 1].id
+      : null;
 
-    messagesEl.querySelectorAll("[data-copy]").forEach((btn) => {
+    // 1. 流式输出快速路径：同一会话、同一消息列表，仅局部更新正在生成的那 1 条 DOM，彻底避免重画历史
+    const sameWindow =
+      curSid === lastRenderedSessionId &&
+      startIdx === lastRenderedStartIndex &&
+      msgs.length === lastRenderedCount;
+
+    if (sameWindow && streamingId && !pendingJumpMessageId) {
+      const streamingMsg = msgs.find((m) => m.id === streamingId);
+      const existingNode = messagesEl.querySelector(
+        '[data-msg-id="' + streamingId.replace(/"/g, "") + '"]'
+      );
+      if (streamingMsg && existingNode) {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = renderMessage(streamingMsg, true, state.workspacePath, true);
+        const freshNode = tmp.firstElementChild;
+        if (freshNode) {
+          existingNode.replaceWith(freshNode);
+          bindMessageInteractions(freshNode);
+          if (shouldStickBottom) {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+          return;
+        }
+      }
+    }
+
+    // 2. 构建列表指纹：后台心跳/Git 刷新导致内容完全无变化时直接跳过整棵 DOM 重建
+    const lastMsg = msgs[msgs.length - 1];
+    const listKey = [
+      curSid,
+      startIdx,
+      msgs.length,
+      state.isRunning ? "1" : "0",
+      streamingId || "",
+      handoff ? handoff.createdAt : "",
+      lastMsg.id,
+      (lastMsg.text || "").length,
+      (lastMsg.thinking || "").length,
+      (lastMsg.tools || []).length,
+      lastMsg.meta ? JSON.stringify(lastMsg.meta) : "",
+    ].join("|");
+
+    if (listKey === lastRenderedListKey && !pendingJumpMessageId) {
+      return;
+    }
+
+    const prependedOlder =
+      curSid === lastRenderedSessionId && startIdx < lastRenderedStartIndex;
+    const prevHeightBeforeRender = scrollAnchor
+      ? scrollAnchor.prevHeight
+      : messagesEl.scrollHeight;
+    const prevTopBeforeRender = scrollAnchor
+      ? scrollAnchor.prevTop
+      : messagesEl.scrollTop;
+
+    const olderSentinelHtml = hasMoreOlder
+      ? '<div class="older-sentinel">向上滑动自动加载更早记录</div>'
+      : "";
+
+    messagesEl.innerHTML =
+      olderSentinelHtml +
+      renderHandoffCard(false) +
+      msgs
+        .map((m) => {
+          const isStreamingThis = Boolean(streamingId && m.id === streamingId);
+          return renderMessageCached(m, isStreamingThis, state.workspacePath, state.isRunning);
+        })
+        .join("");
+
+    bindMessageInteractions(messagesEl);
+
+    lastRenderedSessionId = curSid;
+    lastRenderedStartIndex = startIdx;
+    lastRenderedCount = msgs.length;
+    lastRenderedListKey = listKey;
+    isLoadingOlder = false;
+    scrollAnchor = null;
+
+    if (pendingJumpMessageId) {
+      const targetId = pendingJumpMessageId;
+      pendingJumpMessageId = null;
+      suppressAutoLoadUntil = Date.now() + 500;
+      if (!jumpToMessageById(targetId) && (isSessionSwitchOrInit || shouldStickBottom)) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    } else if (prependedOlder) {
+      // 上滑加载更早消息后，精确锚定原来的阅读位置，不跳屏
+      const delta = messagesEl.scrollHeight - prevHeightBeforeRender;
+      messagesEl.scrollTop = Math.max(0, prevTopBeforeRender + delta);
+    } else if (isSessionSwitchOrInit || shouldStickBottom) {
+      // 首次打开或切换会话时，确保等浏览器布局完成后稳定停留在底部最新消息
+      suppressAutoLoadUntil = Date.now() + 500;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      requestAnimationFrame(() => {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        requestAnimationFrame(() => {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        });
+      });
+    }
+  }
+
+  function bindMessageInteractions(root) {
+    root.querySelectorAll("[data-jump-session]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        flushDraftNow();
+        vscode.postMessage({ type: "selectSession", sessionId: btn.dataset.jumpSession });
+      });
+    });
+
+    root.querySelectorAll("[data-retry-msg]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (currentState && currentState.isRunning) return;
+        const msgId = btn.dataset.retryMsg;
+        if (msgId) {
+          vscode.postMessage({ type: "retryMessage", messageId: msgId });
+        }
+      });
+    });
+
+    root.querySelectorAll("[data-refresh-conn]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        btn.textContent = "正在刷新连接...";
+        vscode.postMessage({ type: "connect", force: true });
+      });
+    });
+
+    root.querySelectorAll("[data-copy]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const text = decodeURIComponent(btn.dataset.copy || "");
         vscode.postMessage({ type: "copyText", text });
@@ -928,7 +1564,7 @@ import { Marked, Renderer } from "marked";
       });
     });
 
-    messagesEl.querySelectorAll("[data-open-file]").forEach((el) => {
+    root.querySelectorAll("[data-open-file]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
         vscode.postMessage({
@@ -939,13 +1575,40 @@ import { Marked, Renderer } from "marked";
         });
       });
     });
-
-    if (shouldStickBottom) {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
   }
 
-  function renderMessage(m, isStreamingThis, workspacePath) {
+  function renderMessageCached(m, isStreamingThis, workspacePath, anyRunning) {
+    if (isStreamingThis) {
+      return renderMessage(m, true, workspacePath, anyRunning);
+    }
+    const isErr = Boolean(
+      (m.meta && m.meta.isError) ||
+      /^执行失败：|^启动远程 SSH 失败：/.test((m.text || "").trim())
+    );
+    const sig =
+      (m.text || "").length +
+      "|" +
+      (m.thinking || "").length +
+      "|" +
+      (m.tools ? m.tools.length : 0) +
+      "|" +
+      (m.meta ? JSON.stringify(m.meta) : "") +
+      "|" +
+      (isErr && anyRunning ? "1" : "0");
+    const cached = renderedMsgCache.get(m.id);
+    if (cached && cached.sig === sig) {
+      return cached.html;
+    }
+    const html = renderMessage(m, false, workspacePath, anyRunning);
+    renderedMsgCache.set(m.id, { sig, html });
+    if (renderedMsgCache.size > 400) {
+      const oldestKey = renderedMsgCache.keys().next().value;
+      if (oldestKey) renderedMsgCache.delete(oldestKey);
+    }
+    return html;
+  }
+
+  function renderMessage(m, isStreamingThis, workspacePath, anyRunning) {
     if (m.role === "user") {
       let attHtml = "";
       if (m.attachments && m.attachments.length > 0) {
@@ -966,14 +1629,14 @@ import { Marked, Renderer } from "marked";
           "</div>";
       }
       return (
-        '<div class="msg-user-card">' +
+        '<div class="msg-user-card" data-msg-id="' + escapeHtml(m.id) + '">' +
         attHtml +
         '<div class="msg-user-text">' + escapeHtml(m.text) + "</div>" +
         "</div>"
       );
     }
 
-    let html = '<div class="msg-assistant">';
+    let html = '<div class="msg-assistant" data-msg-id="' + escapeHtml(m.id) + '">';
 
     if (m.thinking && m.thinking.trim()) {
       html +=
@@ -1021,15 +1684,36 @@ import { Marked, Renderer } from "marked";
         if (typeof m.meta.durationMs === "number") parts.push((m.meta.durationMs / 1000).toFixed(1) + "s");
         if (typeof m.meta.costUsd === "number") parts.push("$" + m.meta.costUsd.toFixed(4));
       }
-      const hasText = Boolean(m.text && m.text.trim());
-      if (parts.length > 0 || hasText) {
+      const trimmedText = (m.text || "").trim();
+      const hasText = Boolean(trimmedText);
+      const isFailed = Boolean(
+        (m.meta && m.meta.isError) ||
+        /^执行失败：|^启动远程 SSH 失败：/.test(trimmedText)
+      );
+      const failCount = (m.meta && typeof m.meta.failCount === "number") ? m.meta.failCount : (isFailed ? 1 : 0);
+
+      if (isFailed && failCount >= 3) {
+        html +=
+          '<div class="retry-warn-bar">' +
+          '<span class="retry-warn-text">已连续失败 ' + failCount + " 次，可能是代理或网络波动导致连接异常，建议先刷新连接状况再重试。</span>" +
+          '<button class="retry-reconnect-btn" data-refresh-conn="1" title="重新建立本地 DevSpace 与 SSH 隧道">' +
+          ICON_REFRESH + "<span>刷新连接状况</span></button>" +
+          "</div>";
+      }
+
+      if (parts.length > 0 || hasText || isFailed) {
+        const retryLabel = failCount >= 2 ? "重试 (已失败 " + failCount + " 次)" : "重试";
+        const retryBtnHtml = isFailed
+          ? '<button class="msg-retry-btn" data-retry-msg="' + escapeHtml(m.id) + '" title="原地重试本条提问"' +
+            (anyRunning ? " disabled" : "") + ">" + ICON_REFRESH + "<span>" + escapeHtml(retryLabel) + "</span></button>"
+          : "";
         const copyBtnHtml = hasText
           ? '<button class="msg-copy-btn" data-copy="' + encodeURIComponent(m.text) + '" title="复制整条 Markdown 内容">' + ICON_COPY + "<span>复制</span></button>"
           : "";
         html +=
           '<div class="msg-footer">' +
           '<span class="msg-meta-text">' + escapeHtml(parts.join(" · ")) + "</span>" +
-          copyBtnHtml +
+          '<div class="msg-footer-actions">' + retryBtnHtml + copyBtnHtml + "</div>" +
           "</div>";
       }
     }

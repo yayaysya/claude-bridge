@@ -72,6 +72,11 @@ export class BridgeManager implements vscode.Disposable {
     return { ...this.state };
   }
 
+  /** 仅确保本地 DevSpace MCP 已就绪（不改动或重启当前 SSH 反向隧道） */
+  public async ensureLocalDevspace(cfg?: BridgeConfig): Promise<boolean> {
+    return this.ensureDevspace(cfg ?? getBridgeConfig());
+  }
+
   /** 启动或重连本地 DevSpace 与 SSH 反向隧道 */
   public async connect(forceReconnect = false): Promise<boolean> {
     if (this.connectingPromise && !forceReconnect) {
@@ -130,15 +135,17 @@ export class BridgeManager implements vscode.Disposable {
       return false;
     }
 
-    // 自动确保私钥权限为 600，防止 SSH 拒绝加载
-    try {
-      const stat = fs.statSync(cfg.sshKeyPath);
-      if ((stat.mode & 0o077) !== 0) {
-        fs.chmodSync(cfg.sshKeyPath, 0o600);
-        this.logger.info("Bridge", `已自动修正密钥权限为 600: ${cfg.sshKeyPath}`);
+    // 非 Windows 平台自动确保私钥权限为 600，防止 SSH 拒绝加载
+    if (process.platform !== "win32") {
+      try {
+        const stat = fs.statSync(cfg.sshKeyPath);
+        if ((stat.mode & 0o077) !== 0) {
+          fs.chmodSync(cfg.sshKeyPath, 0o600);
+          this.logger.info("Bridge", `已自动修正密钥权限为 600: ${cfg.sshKeyPath}`);
+        }
+      } catch (err) {
+        this.logger.warn("Bridge", `检查密钥权限失败: ${String(err)}`);
       }
-    } catch (err) {
-      this.logger.warn("Bridge", `检查密钥权限失败: ${String(err)}`);
     }
 
     // 2. 动态检测代理是否存活（auto 模式下若代理端口未开启则自动回退直连，不写死）
@@ -231,6 +238,7 @@ export class BridgeManager implements vscode.Disposable {
     this.logger.info("DevSpace", `正在启动本地 DevSpace: ${binPath} serve`);
     const child = spawn(binPath, ["serve"], {
       env,
+      shell: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.devspaceProc = child;

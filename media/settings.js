@@ -3,8 +3,155 @@
   let currentProxyMode = "auto";
   let rulePaths = ["~/.claude/CLAUDE.md"];
   let envProxyStr = "";
+  let cachedOwnerToken = "";
+  let ownerPwVisible = false;
+  let activeProfileId = "default";
+  let wizardTargetProfileId = "default";
+  let totalProfiles = 1;
+  let lastSyncedWizardTargetKey = "";
+  let cachedActiveProfile = null;
+  let cachedWizardTargetProfile = null;
+  const wizardStateByProfile = Object.create(null);
+
+  function getWizardStore(pid) {
+    const key = pid || "default";
+    if (!wizardStateByProfile[key]) {
+      wizardStateByProfile[key] = {
+        pwHost: "",
+        pwPort: "",
+        pwUser: "root",
+        pwCreateNonRoot: true,
+        pwNewUserName: "claude",
+        pwExpanded: false,
+        passwordlessLog: "",
+        vpsLog: "",
+        verifyResult: null,
+        timezone: "America/New_York",
+        geometry: "1366x768",
+        withDesktop: true,
+      };
+    }
+    return wizardStateByProfile[key];
+  }
+
+  function snapshotWizardDomToStore(pid) {
+    if (!pid) return;
+    const st = getWizardStore(pid);
+    st.pwHost = $("pwHost").value;
+    st.pwPort = $("pwPort").value;
+    st.pwUser = $("pwUser").value;
+    st.pwCreateNonRoot = $("pwCreateNonRoot").checked;
+    st.pwNewUserName = $("pwNewUserName").value;
+    st.pwExpanded = $("passwordlessBox").open;
+    st.timezone = $("wizTimezone").value;
+    st.geometry = $("wizGeometry").value;
+    st.withDesktop = $("wizWithDesktop").checked;
+  }
+
+  function renderWizardVerifyResult(r) {
+    const cl = $("wizVerifyChecklist");
+    const sm = $("wizVerifySummary");
+    if (!r) {
+      cl.innerHTML = "";
+      sm.textContent = "";
+      return;
+    }
+    const pill = (ok, label) =>
+      '<span class="check-pill ' + (ok ? "ok" : "warn") + '">' + (ok ? "✓ " : "✗ ") + escapeHtml(label) + "</span>";
+    cl.innerHTML =
+      pill(r.sshOk, "SSH 连通") +
+      pill(r.claudeInstalled, r.claudeInstalled ? "Claude " + r.claudeVersion : "Claude 未安装") +
+      pill(r.claudeLoggedIn, r.claudeLoggedIn ? "Claude 账号已登录" : "Claude 未登录") +
+      pill(r.devspaceMcpConnected, r.devspaceMcpConnected ? "DevSpace MCP 已授权" : "DevSpace 未授权");
+    sm.textContent = r.summary || "";
+  }
+
+  function restoreWizardDomFromStore(profile) {
+    if (!profile) return;
+    const st = getWizardStore(profile.id);
+    $("pwHost").value = st.pwHost || profile.sshHost || "";
+    $("pwPort").value = st.pwPort || String(profile.sshPort || 22);
+    $("pwUser").value = st.pwUser || "root";
+    $("pwPassword").value = "";
+    $("pwCreateNonRoot").checked = Boolean(st.pwCreateNonRoot);
+    $("pwNewUserName").value = st.pwNewUserName || "claude";
+    $("passwordlessBox").open = Boolean(st.pwExpanded);
+    $("wizTimezone").value = st.timezone || "America/New_York";
+    $("wizGeometry").value = st.geometry || "1366x768";
+    $("wizWithDesktop").checked = Boolean(st.withDesktop);
+
+    const pwLogEl = $("wizPasswordlessLog");
+    pwLogEl.textContent = st.passwordlessLog || "";
+    pwLogEl.classList.toggle("show", Boolean(st.passwordlessLog));
+
+    const vpsLogEl = $("wizVpsLog");
+    vpsLogEl.textContent = st.vpsLog || "";
+    vpsLogEl.classList.toggle("show", Boolean(st.vpsLog));
+
+    renderWizardVerifyResult(st.verifyResult);
+  }
+
+  function collectWizardTargetForm() {
+    return {
+      name: $("wizTargetName").value.trim(),
+      sshHost: $("wizTargetHost").value.trim(),
+      sshPort: Number($("wizTargetPort").value) || 22,
+      sshUser: $("wizTargetUser").value.trim() || "ubuntu",
+      sshKeyPath: $("wizTargetKeyPath").value.trim(),
+    };
+  }
+
+  function renderWizardTargetContext(targetProfile, activeProfile) {
+    if (!targetProfile) return;
+    const isSameAsActive = activeProfile && targetProfile.id === activeProfile.id;
+    const targetDesc = targetProfile.name + (targetProfile.sshHost ? " (" + targetProfile.sshHost + ")" : "（未填 IP）");
+    const activeDesc = activeProfile ? activeProfile.name : "主力服务器";
+
+    const banner = $("wizTargetBanner");
+    if (banner) {
+      if (isSameAsActive) {
+        banner.className = "target-banner warn";
+        banner.innerHTML =
+          "<strong>当前向导目标：" + escapeHtml(targetDesc) + "</strong>" +
+          "<span>提示：这正是聊天正在使用的服务器。如要配置新 VPS，请先点上方「+ 新增服务器档案」，绝不会影响此主机。</span>";
+      } else {
+        banner.className = "target-banner safe";
+        banner.innerHTML =
+          "<strong>当前向导目标：" + escapeHtml(targetDesc) + "</strong>" +
+          "<span>独立配置中 · 聊天侧边栏仍保持在「" + escapeHtml(activeDesc) + "」，互不干扰。</span>";
+      }
+    }
+
+    const step2Tag = $("wizStep2Target");
+    if (step2Tag) {
+      step2Tag.textContent = "将作用于：" + targetDesc;
+    }
+
+    const finishBtn = $("wizFinishBtn");
+    if (finishBtn) {
+      finishBtn.textContent = isSameAsActive
+        ? "关闭临时桌面并进入对话"
+        : "关闭临时桌面并切换到「" + targetProfile.name + "」对话";
+    }
+  }
 
   const $ = (id) => document.getElementById(id);
+
+  function switchTab(tabName) {
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === tabName);
+    });
+    document.querySelectorAll(".tab-pane").forEach((p) => {
+      p.classList.toggle("active", p.id === "tab-" + tabName);
+    });
+    if (tabName === "wizard") {
+      vscode.postMessage({ type: "wizardRefreshLocal" });
+    }
+  }
+
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
 
   const toastBar = $("toastBar");
   const bridgeBadge = $("bridgeBadge");
@@ -150,6 +297,7 @@
     }
 
     return {
+      profileName: $("profileName").value.trim(),
       sshHost: $("sshHost").value.trim(),
       sshUser: $("sshUser").value.trim() || "ubuntu",
       sshPort: Number($("sshPort").value) || 22,
@@ -178,6 +326,105 @@
   $("saveReconnectBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "save", config: collectFormConfig(), reconnect: true });
   });
+
+  $("deleteProfileBtn").addEventListener("click", () => {
+    if (totalProfiles <= 1) {
+      showToast(false, "至少需要保留 1 个服务器档案。");
+      return;
+    }
+    vscode.postMessage({ type: "deleteProfile", profileId: activeProfileId });
+  });
+
+  function renderProfileBars(profiles, activeId, wizTargetId) {
+    totalProfiles = (profiles || []).length;
+    activeProfileId = activeId || "default";
+    const nextWizId = wizTargetId || activeProfileId;
+    $("deleteProfileBtn").disabled = totalProfiles <= 1;
+
+    // 常规设置页：用于切换「聊天正在使用的服务器」
+    const generalBar = $("profileBar");
+    if (generalBar) {
+      generalBar.innerHTML =
+        (profiles || [])
+          .map((p) => {
+            const isAct = p.id === activeProfileId;
+            const hostSub = p.sshHost
+              ? '<span class="profile-chip-host">' + escapeHtml(p.sshHost) + "</span>"
+              : '<span class="profile-chip-host">未配置</span>';
+            return (
+              '<button type="button" class="profile-chip ' + (isAct ? "active" : "") + '" data-select-profile="' + escapeHtml(p.id) + '">' +
+              "<span>" + (isAct ? "● " : "") + escapeHtml(p.name) + "</span>" +
+              hostSub +
+              "</button>"
+            );
+          })
+          .join("") +
+        '<button type="button" class="profile-chip add" data-add-profile="general">+ 新增服务器档案</button>';
+
+      generalBar.querySelectorAll("[data-select-profile]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const pid = btn.dataset.selectProfile;
+          if (pid && pid !== activeProfileId) {
+            vscode.postMessage({
+              type: "selectProfile",
+              profileId: pid,
+              reconnect: true,
+            });
+          }
+        });
+      });
+      generalBar.querySelectorAll("[data-add-profile]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          vscode.postMessage({ type: "createProfile" });
+        });
+      });
+    }
+
+    // 向导页：只切换「向导操作目标」，不影响聊天主力机，且标出哪台正在聊天中
+    const wizBar = $("wizProfileBar");
+    if (wizBar) {
+      wizBar.innerHTML =
+        (profiles || [])
+          .map((p) => {
+            const isTarget = p.id === nextWizId;
+            const isChatActive = p.id === activeProfileId;
+            const hostSub = p.sshHost
+              ? '<span class="profile-chip-host">' + escapeHtml(p.sshHost) + "</span>"
+              : '<span class="profile-chip-host">未配置</span>';
+            const chatBadge = isChatActive
+              ? '<span class="profile-chip-badge">聊天中</span>'
+              : "";
+            return (
+              '<button type="button" class="profile-chip ' + (isTarget ? "active" : "") + '" data-wiz-target="' + escapeHtml(p.id) + '">' +
+              "<span>" + (isTarget ? "● " : "") + escapeHtml(p.name) + "</span>" +
+              hostSub +
+              chatBadge +
+              "</button>"
+            );
+          })
+          .join("") +
+        '<button type="button" class="profile-chip add" data-add-profile="wizard">+ 新增服务器档案</button>';
+
+      wizBar.querySelectorAll("[data-wiz-target]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const pid = btn.dataset.wizTarget;
+          if (pid && pid !== wizardTargetProfileId) {
+            snapshotWizardDomToStore(wizardTargetProfileId);
+            vscode.postMessage({
+              type: "selectWizardTarget",
+              profileId: pid,
+            });
+          }
+        });
+      });
+      wizBar.querySelectorAll("[data-add-profile]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          snapshotWizardDomToStore(wizardTargetProfileId);
+          vscode.postMessage({ type: "createWizardProfile" });
+        });
+      });
+    }
+  }
 
   $("pickKeyBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "pickKeyFile" });
@@ -214,6 +461,163 @@
     vscode.postMessage({ type: "openRawSettings" });
   });
 
+  // ===== 新机配置向导事件绑定 =====
+  $("wizPickRootBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardPickProjectRoot" });
+  });
+
+  $("wizSetupLocalBtn").addEventListener("click", () => {
+    const root = $("wizProjectRoot").value.trim();
+    const logEl = $("wizLocalLog");
+    logEl.textContent = "";
+    logEl.classList.add("show");
+    vscode.postMessage({ type: "wizardSetupLocal", projectRoot: root });
+  });
+
+  $("wizTogglePwBtn").addEventListener("click", () => {
+    ownerPwVisible = !ownerPwVisible;
+    $("wizOwnerPw").textContent = ownerPwVisible ? cachedOwnerToken : "••••••••••••";
+    $("wizTogglePwBtn").textContent = ownerPwVisible ? "隐藏" : "显示";
+  });
+
+  function copyOwnerPassword() {
+    if (!cachedOwnerToken) {
+      showToast(false, "尚未检测到本地 DevSpace Owner Password，请先完成第 1 步。");
+      return;
+    }
+    vscode.postMessage({ type: "copyText", text: cachedOwnerToken });
+  }
+  $("wizCopyPwBtn").addEventListener("click", copyOwnerPassword);
+  $("wizCopyPwBtn2").addEventListener("click", copyOwnerPassword);
+
+  $("wizPickKeyBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "pickWizardKeyFile" });
+  });
+
+  $("wizSaveTargetBtn").addEventListener("click", () => {
+    vscode.postMessage({
+      type: "saveWizardTarget",
+      target: collectWizardTargetForm(),
+    });
+  });
+
+  $("wizPasswordlessBtn").addEventListener("click", () => {
+    const targetForm = collectWizardTargetForm();
+    const host = $("pwHost").value.trim() || targetForm.sshHost;
+    const port = Number($("pwPort").value) || targetForm.sshPort || 22;
+    const loginUser = $("pwUser").value.trim() || "root";
+    const password = $("pwPassword").value;
+    if (!host || !password) {
+      showToast(false, "请填写 VPS 地址和一次性登录密码。");
+      return;
+    }
+    const st = getWizardStore(wizardTargetProfileId);
+    st.passwordlessLog = "";
+    const logEl = $("wizPasswordlessLog");
+    logEl.textContent = "";
+    logEl.classList.add("show");
+    snapshotWizardDomToStore(wizardTargetProfileId);
+    vscode.postMessage({
+      type: "wizardSetupPasswordless",
+      target: targetForm,
+      host,
+      port,
+      loginUser,
+      password,
+      createNonRootUser: $("pwCreateNonRoot").checked,
+      newUserName: $("pwNewUserName").value.trim() || "claude",
+    });
+  });
+
+  $("wizSetupVpsBtn").addEventListener("click", () => {
+    const st = getWizardStore(wizardTargetProfileId);
+    st.vpsLog = "";
+    const logEl = $("wizVpsLog");
+    logEl.textContent = "";
+    logEl.classList.add("show");
+    snapshotWizardDomToStore(wizardTargetProfileId);
+    vscode.postMessage({
+      type: "wizardSetupVps",
+      target: collectWizardTargetForm(),
+      timezone: $("wizTimezone").value,
+      withDesktop: $("wizWithDesktop").checked,
+      geometry: $("wizGeometry").value,
+    });
+  });
+
+  $("wizStartDesktopBtn").addEventListener("click", () => {
+    snapshotWizardDomToStore(wizardTargetProfileId);
+    vscode.postMessage({
+      type: "wizardStartDesktop",
+      target: collectWizardTargetForm(),
+      geometry: $("wizGeometry").value,
+    });
+  });
+
+  $("wizReopenDesktopBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardOpenDesktopUrl" });
+  });
+
+  $("wizStopDesktopBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardStopDesktop" });
+  });
+
+  $("wizSyncClipboardBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardSyncClipboard" });
+  });
+
+  $("wizSendPwToRemoteBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardPushDevspacePassword" });
+  });
+
+  $("wizVerifyBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardVerify" });
+  });
+
+  $("wizFinishBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "wizardFinish" });
+  });
+
+  function renderLocalChecklist(st) {
+    const el = $("wizLocalChecklist");
+    if (!st) {
+      el.innerHTML = '<span class="check-pill">正在检测本机环境...</span>';
+      return;
+    }
+    const pill = (ok, label) =>
+      '<span class="check-pill ' + (ok ? "ok" : "warn") + '">' + (ok ? "✓ " : "○ ") + escapeHtml(label) + "</span>";
+    el.innerHTML =
+      pill(st.nodeOk, "Node " + st.nodeVersion) +
+      pill(st.devspaceInstalled, st.devspaceInstalled ? "DevSpace v" + st.devspaceVersion : "DevSpace 未安装") +
+      pill(st.configExists && st.allowedRoots.length > 0, st.allowedRoots.length > 0 ? "已授权 " + st.allowedRoots.length + " 个目录" : "尚未初始化") +
+      pill(st.subagentsDisabled, st.subagentsDisabled ? "本地 subagents 已关闭" : "建议关闭本地 subagents") +
+      pill(st.oauthDays >= 180, "OAuth 有效期 " + st.oauthDays + " 天");
+
+    if (!$("wizProjectRoot").value.trim() && st.allowedRoots.length > 0) {
+      $("wizProjectRoot").value = st.allowedRoots[0];
+    }
+
+    cachedOwnerToken = st.ownerToken || "";
+    const pwRow = $("wizPasswordRow");
+    if (cachedOwnerToken) {
+      pwRow.style.display = "flex";
+      $("wizOwnerPw").textContent = ownerPwVisible ? cachedOwnerToken : "••••••••••••";
+    } else {
+      pwRow.style.display = "none";
+    }
+  }
+
+  function renderDesktopState(ds) {
+    if (!ds) return;
+    let statusText = "当前状态：" + (ds.detail || "未启动");
+    if (ds.running && ds.profileId && ds.profileId !== wizardTargetProfileId) {
+      statusText += "（属于「" + (ds.profileName || ds.profileId) + "」）";
+    }
+    $("wizDesktopStatus").textContent = statusText;
+    $("wizReopenDesktopBtn").style.display = ds.running ? "inline-block" : "none";
+    $("wizStopDesktopBtn").style.display = ds.running ? "inline-block" : "none";
+  }
+
   window.addEventListener("message", (event) => {
     const msg = event.data;
     if (!msg) return;
@@ -230,7 +634,52 @@
       bridgeBadge.innerHTML = '<span class="dot ' + escapeHtml(st) + '"></span><span>' + label + "</span>";
       bridgeBadge.title = p.bridge?.detail || "";
 
-      // 填充表单
+      // 填充服务器档案与表单（常规页显示聊天活跃机，向导页独立显示向导目标机）
+      const actProf = p.activeProfile || null;
+      const wizProf = p.wizardTargetProfile || actProf;
+      cachedActiveProfile = actProf;
+      cachedWizardTargetProfile = wizProf;
+
+      const prevWizId = wizardTargetProfileId;
+      const nextWizId = (wizProf && wizProf.id) || (actProf && actProf.id) || "default";
+      const switchedWizTarget = prevWizId !== nextWizId;
+      if (switchedWizTarget && prevWizId) {
+        snapshotWizardDomToStore(prevWizId);
+      }
+      wizardTargetProfileId = nextWizId;
+
+      renderProfileBars(p.profiles || [], actProf && actProf.id, nextWizId);
+      renderWizardTargetContext(wizProf, actProf);
+
+      // 仅当向导目标切换或后端数据更新时同步向导目标字段，避免打断用户输入
+      if (wizProf) {
+        const targetKey = JSON.stringify([
+          wizProf.id,
+          wizProf.name,
+          wizProf.sshHost,
+          wizProf.sshPort,
+          wizProf.sshUser,
+          wizProf.sshKeyPath,
+        ]);
+        if (switchedWizTarget || targetKey !== lastSyncedWizardTargetKey) {
+          lastSyncedWizardTargetKey = targetKey;
+          $("wizTargetName").value = wizProf.name || "";
+          $("wizTargetHost").value = wizProf.sshHost || "";
+          $("wizTargetPort").value = wizProf.sshPort || 22;
+          $("wizTargetUser").value = wizProf.sshUser || "ubuntu";
+          $("wizTargetKeyPath").value = wizProf.sshKeyPath || "";
+          const st = getWizardStore(wizProf.id);
+          if (wizProf.sshHost && !st.pwHost) {
+            st.pwHost = wizProf.sshHost;
+          }
+          if (wizProf.sshPort && !st.pwPort) {
+            st.pwPort = String(wizProf.sshPort);
+          }
+          restoreWizardDomFromStore(wizProf);
+        }
+      }
+
+      $("profileName").value = (actProf && actProf.name) || "主力服务器";
       $("sshHost").value = cfg.sshHost || "";
       $("sshUser").value = cfg.sshUser || "ubuntu";
       $("sshPort").value = cfg.sshPort || 22;
@@ -263,6 +712,12 @@
         : ["~/.claude/CLAUDE.md"];
       renderRulePaths();
       renderMemories(p.memories || []);
+      renderLocalChecklist(p.localStatus);
+      renderDesktopState(p.desktopState);
+
+      if (p.activeTab === "wizard" || p.activeTab === "general") {
+        switchTab(p.activeTab);
+      }
 
       if (p.focusSection) {
         const targetEl = document.getElementById("section-" + p.focusSection);
@@ -270,6 +725,90 @@
           targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
         }
       }
+      return;
+    }
+
+    if (msg.type === "wizardPickedRoot" && msg.path) {
+      $("wizProjectRoot").value = msg.path;
+      return;
+    }
+
+    if (msg.type === "wizardLog") {
+      if (msg.target === "local") {
+        const logEl = $("wizLocalLog");
+        if (logEl) {
+          logEl.classList.add("show");
+          logEl.textContent += (logEl.textContent ? "\n" : "") + (msg.line || "");
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+        return;
+      }
+
+      const pid = msg.profileId || wizardTargetProfileId;
+      const st = getWizardStore(pid);
+      if (msg.target === "passwordless") {
+        st.passwordlessLog += (st.passwordlessLog ? "\n" : "") + (msg.line || "");
+      } else {
+        st.vpsLog += (st.vpsLog ? "\n" : "") + (msg.line || "");
+      }
+
+      // 仅当日志属于当前正在查看的向导目标服务器时，才刷新到界面黑框
+      if (pid === wizardTargetProfileId) {
+        const logEl = msg.target === "passwordless" ? $("wizPasswordlessLog") : $("wizVpsLog");
+        if (logEl) {
+          logEl.classList.add("show");
+          logEl.textContent = msg.target === "passwordless" ? st.passwordlessLog : st.vpsLog;
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+      }
+      return;
+    }
+
+    if (msg.type === "passwordlessDone") {
+      // 无论成败，完成后立刻清空前端密码输入框，绝不残留明文
+      $("pwPassword").value = "";
+      return;
+    }
+
+    if (msg.type === "wizardBusy") {
+      const busy = Boolean(msg.busy);
+      if (msg.step === "local") {
+        $("wizSetupLocalBtn").disabled = busy;
+        $("wizSetupLocalBtn").textContent = busy ? "正在安装初始化..." : "一键安装并初始化";
+      } else if (msg.step === "passwordless") {
+        $("wizPasswordlessBtn").disabled = busy;
+        $("wizPasswordlessBtn").textContent = busy
+          ? "正在生成并部署免密密钥..."
+          : "用密码一键配置免密登录";
+      } else if (msg.step === "vps") {
+        $("wizSetupVpsBtn").disabled = busy;
+        $("wizSetupVpsBtn").textContent = busy ? "正在初始化 VPS（约 1~3 分钟）..." : "一键初始化远程 VPS";
+      } else if (msg.step === "desktop") {
+        $("wizStartDesktopBtn").disabled = busy;
+        $("wizStartDesktopBtn").textContent = busy ? "正在启动远程画面..." : "打开远程登录画面（网页直连）";
+      } else if (msg.step === "clipboard") {
+        $("wizSyncClipboardBtn").disabled = busy;
+        $("wizSendPwToRemoteBtn").disabled = busy;
+        $("wizSyncClipboardBtn").textContent = busy ? "正在同步..." : "同步本机剪贴板到远程";
+      } else if (msg.step === "verify") {
+        $("wizVerifyBtn").disabled = busy;
+        $("wizVerifyBtn").textContent = busy ? "正在检测..." : "一键检测授权状态";
+      }
+      return;
+    }
+
+    if (msg.type === "wizardVerifyResult" && msg.result) {
+      const pid = msg.profileId || wizardTargetProfileId;
+      const st = getWizardStore(pid);
+      st.verifyResult = msg.result;
+      if (pid === wizardTargetProfileId) {
+        renderWizardVerifyResult(msg.result);
+      }
+      return;
+    }
+
+    if (msg.type === "pickedWizardKeyFile") {
+      $("wizTargetKeyPath").value = msg.path || "";
       return;
     }
 

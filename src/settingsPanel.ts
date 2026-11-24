@@ -18,9 +18,15 @@ import {
 import { BridgeLogger } from "./logger";
 import { MemoryManager, RemoteMemoryItem } from "./memoryManager";
 import { RulesSyncManager } from "./rulesSync";
+import { LocalSetupStatus, SetupWizardManager } from "./setupWizard";
+import {
+  ProfileStore,
+  ServerProfile,
+  profileToBridgeConfig,
+} from "./profileStore";
 
 /**
- * 专属可视化「设置中心」WebviewPanel（替代难用的 VS Code 原生设置页）
+ * 专属可视化「设置中心」+「新机配置向导」WebviewPanel
  * 单例模式：重复打开时自动聚焦已有标签页。
  */
 export class SettingsPanel {
@@ -29,24 +35,35 @@ export class SettingsPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private cachedMemories: RemoteMemoryItem[] = [];
+  private cachedLocalStatus: LocalSetupStatus | undefined;
+  private wizardTargetProfileId = "";
 
   public static show(params: {
     extensionUri: vscode.Uri;
     bridge: BridgeManager;
     rulesSync: RulesSyncManager;
     memory: MemoryManager;
+    wizard: SetupWizardManager;
+    profiles: ProfileStore;
     logger: BridgeLogger;
     focusSection?: "server" | "memory";
+    initialTab?: "general" | "wizard";
   }): SettingsPanel {
     if (SettingsPanel.currentPanel) {
       SettingsPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
-      SettingsPanel.currentPanel.syncState(params.focusSection);
+      SettingsPanel.currentPanel.syncState(
+        params.focusSection,
+        params.initialTab
+      );
+      if (params.initialTab === "wizard") {
+        void SettingsPanel.currentPanel.refreshLocalWizardStatus();
+      }
       return SettingsPanel.currentPanel;
     }
 
     const panel = vscode.window.createWebviewPanel(
       "claudeBridge.settings",
-      "ClaudeBridge · 渡桥 设置中心",
+      "ClaudeBridge · 渡桥 设置与向导",
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -64,12 +81,16 @@ export class SettingsPanel {
       params.bridge,
       params.rulesSync,
       params.memory,
+      params.wizard,
+      params.profiles,
       params.logger
     );
 
-    if (params.focusSection) {
-      SettingsPanel.currentPanel.syncState(params.focusSection);
-    }
+    SettingsPanel.currentPanel.syncState(
+      params.focusSection,
+      params.initialTab
+    );
+    void SettingsPanel.currentPanel.refreshLocalWizardStatus();
     return SettingsPanel.currentPanel;
   }
 
@@ -79,15 +100,20 @@ export class SettingsPanel {
     private readonly bridge: BridgeManager,
     private readonly rulesSync: RulesSyncManager,
     private readonly memory: MemoryManager,
+    private readonly wizard: SetupWizardManager,
+    private readonly profiles: ProfileStore,
     private readonly logger: BridgeLogger
   ) {
     this.panel = panel;
     this.cachedMemories = this.memory.listCachedBackups();
+    this.wizardTargetProfileId = this.profiles.getActiveProfile().id;
     this.panel.webview.html = this.renderHtml(this.panel.webview);
 
     this.disposables.push(
       this.panel.onDidDispose(() => this.dispose()),
       this.bridge.onDidChangeState(() => this.syncState()),
+      this.wizard.onDidChangeDesktopState(() => this.syncState()),
+      this.profiles.onDidChangeActiveProfile(() => this.syncState()),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (
           e.affectsConfiguration("claudeBridge") ||
@@ -102,13 +128,66 @@ export class SettingsPanel {
     );
   }
 
+  private async refreshLocalWizardStatus(): Promise<void> {
+    this.cachedLocalStatus = await this.wizard.inspectLocalStatus(
+      getBridgeConfig()
+    );
+    this.syncState();
+  }
+
   /** 外部直接触发拉取远程记忆并刷新设置中心记忆列表 */
   public async triggerPullMemories(): Promise<void> {
     await this.handlePullMemories();
   }
 
-  public syncState(focusSection?: string): void {
+  private getWizardTargetProfile(): ServerProfile {
+    const found = this.wizardTargetProfileId
+      ? this.profiles.getProfileById(this.wizardTargetProfileId)
+      : undefined;
+    if (found) {
+      return found;
+    }
+    const active = this.profiles.getActiveProfile();
+    this.wizardTargetProfileId = active.id;
+    return active;
+  }
+
+  private getWizardTargetConfig(profile?: ServerProfile): BridgeConfig {
+    return profileToBridgeConfig(
+      getBridgeConfig(),
+      profile ?? this.getWizardTargetProfile()
+    );
+  }
+
+  private async saveWizardTargetPatch(
+    raw: Record<string, unknown> | undefined
+  ): Promise<ServerProfile> {
+    const target = this.getWizardTargetProfile();
+    if (!raw) {
+      return target;
+    }
+    const patch: Partial<ServerProfile> & { id: string } = { id: target.id };
+    if (typeof raw.name === "string" && raw.name.trim()) {
+      patch.name = raw.name.trim();
+    }
+    if (typeof raw.sshHost === "string") {
+      patch.sshHost = raw.sshHost.trim();
+    }
+    if (typeof raw.sshUser === "string" && raw.sshUser.trim()) {
+      patch.sshUser = raw.sshUser.trim();
+    }
+    if (raw.sshPort !== undefined && Number(raw.sshPort) > 0) {
+      patch.sshPort = Number(raw.sshPort);
+    }
+    if (typeof raw.sshKeyPath === "string") {
+      patch.sshKeyPath = raw.sshKeyPath.trim();
+    }
+    return this.profiles.saveProfile(patch, false);
+  }
+
+  public syncState(focusSection?: string, activeTab?: "general" | "wizard"): void {
     const cfg = getBridgeConfig();
+    const wizardTargetProfile = this.getWizardTargetProfile();
     const envProxy =
       process.env.HTTPS_PROXY ||
       process.env.https_proxy ||
@@ -122,12 +201,18 @@ export class SettingsPanel {
       type: "state",
       payload: {
         config: cfg,
+        activeProfile: this.profiles.getActiveProfile(),
+        wizardTargetProfile,
+        profiles: this.profiles.listProfiles(),
         bridge: this.bridge.getState(),
         envProxy,
         logFilePath: this.logger.getLogFilePath(),
         memoryBackupDir: this.memory.getBackupDir(),
         memories: this.cachedMemories,
+        localStatus: this.cachedLocalStatus ?? null,
+        desktopState: this.wizard.getDesktopState(),
         focusSection: focusSection ?? null,
+        activeTab: activeTab ?? null,
       },
     });
   }
@@ -137,12 +222,456 @@ export class SettingsPanel {
     switch (type) {
       case "ready":
         this.syncState();
+        void this.refreshLocalWizardStatus();
         break;
 
+      case "copyText": {
+        const text = String(msg.text ?? "");
+        if (text) {
+          await vscode.env.clipboard.writeText(text);
+          void this.panel.webview.postMessage({
+            type: "toast",
+            ok: true,
+            message: "已复制到剪贴板。",
+          });
+        }
+        break;
+      }
+
+      case "wizardRefreshLocal":
+        await this.refreshLocalWizardStatus();
+        break;
+
+      case "wizardPickProjectRoot": {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          openLabel: "选择要授权给 DevSpace 的项目根目录",
+          defaultUri: vscode.Uri.file(os.homedir()),
+        });
+        if (picked && picked[0]) {
+          void this.panel.webview.postMessage({
+            type: "wizardPickedRoot",
+            path: picked[0].fsPath,
+          });
+        }
+        break;
+      }
+
+      case "wizardSetupLocal": {
+        const projectRoot = String(msg.projectRoot ?? "").trim();
+        void this.panel.webview.postMessage({ type: "wizardBusy", step: "local", busy: true });
+        const res = await this.wizard.setupLocalDevspace(
+          getBridgeConfig(),
+          projectRoot,
+          (line) => {
+            void this.panel.webview.postMessage({ type: "wizardLog", target: "local", line });
+          }
+        );
+        this.cachedLocalStatus = res.status;
+        void this.panel.webview.postMessage({ type: "wizardBusy", step: "local", busy: false });
+        this.syncState();
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "selectWizardTarget": {
+        const pid = String(msg.profileId ?? "");
+        const found = this.profiles.getProfileById(pid);
+        if (!found) {
+          return;
+        }
+        this.wizardTargetProfileId = found.id;
+        this.syncState();
+        break;
+      }
+
+      case "createWizardProfile": {
+        const name = String(msg.name ?? "").trim();
+        const active = this.profiles.getActiveProfile();
+        const created = await this.profiles.createProfile(name, { makeActive: false });
+        this.wizardTargetProfileId = created.id;
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: true,
+          message: `已在向导中新建目标档案「${created.name}」，当前聊天仍保持在「${active.name}」不受影响。`,
+        });
+        break;
+      }
+
+      case "saveWizardTarget": {
+        const saved = await this.saveWizardTargetPatch(
+          msg.target as Record<string, unknown> | undefined
+        );
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: true,
+          message: `已保存向导目标「${saved.name}」的连接参数。`,
+        });
+        break;
+      }
+
+      case "pickWizardKeyFile": {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: "选择目标服务器的 SSH 私钥文件",
+          defaultUri: vscode.Uri.file(os.homedir()),
+          filters: {
+            "SSH 私钥": ["pem", "key", "pub"],
+            "所有文件": ["*"],
+          },
+        });
+        if (picked && picked[0]) {
+          void this.panel.webview.postMessage({
+            type: "pickedWizardKeyFile",
+            path: picked[0].fsPath,
+          });
+        }
+        break;
+      }
+
+      case "wizardSetupVps": {
+        const target = await this.saveWizardTargetPatch(
+          msg.target as Record<string, unknown> | undefined
+        );
+        this.syncState();
+        const targetCfg = this.getWizardTargetConfig(target);
+        const timezone = String(msg.timezone ?? "America/New_York");
+        const withDesktop = Boolean(msg.withDesktop);
+        const geometry = String(msg.geometry ?? "1366x768");
+
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "vps",
+          busy: true,
+          profileId: target.id,
+        });
+        const res = await this.wizard.setupRemoteVps(
+          targetCfg,
+          { timezone, withDesktop, geometry },
+          (line) => {
+            void this.panel.webview.postMessage({
+              type: "wizardLog",
+              target: "vps",
+              profileId: target.id,
+              line,
+            });
+          }
+        );
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "vps",
+          busy: false,
+          profileId: target.id,
+        });
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "wizardSetupPasswordless": {
+        const target = await this.saveWizardTargetPatch(
+          msg.target as Record<string, unknown> | undefined
+        );
+        const targetCfg = this.getWizardTargetConfig(target);
+        const host = String(msg.host ?? target.sshHost ?? "").trim();
+        const port = Number(msg.port ?? target.sshPort) || 22;
+        const loginUser = String(msg.loginUser ?? "root").trim() || "root";
+        const password = String(msg.password ?? "");
+        const createNonRootUser = Boolean(msg.createNonRootUser);
+        const newUserName = String(msg.newUserName ?? "claude").trim() || "claude";
+
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "passwordless",
+          busy: true,
+          profileId: target.id,
+        });
+        const res = await this.wizard.setupPasswordlessSsh(
+          targetCfg,
+          {
+            host,
+            port,
+            loginUser,
+            password,
+            createNonRootUser,
+            newUserName,
+          },
+          (line) => {
+            void this.panel.webview.postMessage({
+              type: "wizardLog",
+              target: "passwordless",
+              profileId: target.id,
+              line,
+            });
+          }
+        );
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "passwordless",
+          busy: false,
+          profileId: target.id,
+        });
+
+        if (res.ok) {
+          await this.profiles.saveProfile(
+            {
+              id: target.id,
+              sshHost: host,
+              sshPort: port,
+              sshUser: res.finalUser,
+              sshKeyPath: res.keyPath,
+            },
+            false
+          );
+          this.syncState();
+        }
+        void this.panel.webview.postMessage({
+          type: "passwordlessDone",
+          ok: res.ok,
+          profileId: target.id,
+          message: res.message,
+        });
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
+        break;
+      }
+
+      case "wizardStartDesktop": {
+        const target = await this.saveWizardTargetPatch(
+          msg.target as Record<string, unknown> | undefined
+        );
+        const targetCfg = this.getWizardTargetConfig(target);
+        const isActiveTarget = target.id === this.profiles.getActiveProfile().id;
+        const geometry = String(msg.geometry ?? "1366x768");
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "desktop",
+          busy: true,
+          profileId: target.id,
+        });
+        // 若目标是当前主力机则确保主隧道连接；若目标是新机则只保证本机 DevSpace 存活，由临时桌面隧道顺带转发 /mcp，完全不打断主力机
+        if (isActiveTarget) {
+          if (this.bridge.getState().status !== "connected") {
+            await this.bridge.connect(false);
+          }
+        } else {
+          await this.bridge.ensureLocalDevspace(targetCfg);
+        }
+        const res = await this.wizard.startRemoteLoginDesktop(targetCfg, geometry, {
+          profileId: target.id,
+          profileName: target.name,
+          forwardDevspace: !isActiveTarget,
+        });
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "desktop",
+          busy: false,
+          profileId: target.id,
+        });
+        this.syncState();
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "wizardOpenDesktopUrl": {
+        const st = this.wizard.getDesktopState();
+        if (st.running && st.url) {
+          await vscode.env.openExternal(vscode.Uri.parse(st.url));
+        }
+        break;
+      }
+
+      case "wizardStopDesktop": {
+        const ds = this.wizard.getDesktopState();
+        const ownerProfile =
+          (ds.profileId && this.profiles.getProfileById(ds.profileId)) ||
+          this.getWizardTargetProfile();
+        const res = await this.wizard.stopRemoteLoginDesktop(
+          this.getWizardTargetConfig(ownerProfile)
+        );
+        this.syncState();
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "wizardSyncClipboard": {
+        const ds = this.wizard.getDesktopState();
+        const ownerProfile =
+          (ds.running && ds.profileId && this.profiles.getProfileById(ds.profileId)) ||
+          this.getWizardTargetProfile();
+        const text = await vscode.env.clipboard.readText();
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "clipboard",
+          busy: true,
+        });
+        const res = await this.wizard.syncClipboardToRemote(
+          this.getWizardTargetConfig(ownerProfile),
+          text,
+          "本机剪贴板"
+        );
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "clipboard",
+          busy: false,
+        });
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "wizardPushDevspacePassword": {
+        if (!this.cachedLocalStatus) {
+          this.cachedLocalStatus = await this.wizard.inspectLocalStatus(getBridgeConfig());
+        }
+        const token = this.cachedLocalStatus?.ownerToken || "";
+        if (!token) {
+          void this.panel.webview.postMessage({
+            type: "toast",
+            ok: false,
+            message: "尚未检测到本机 DevSpace 密码，请先完成第 1 步。",
+          });
+          break;
+        }
+        const ds = this.wizard.getDesktopState();
+        const ownerProfile =
+          (ds.running && ds.profileId && this.profiles.getProfileById(ds.profileId)) ||
+          this.getWizardTargetProfile();
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "clipboard",
+          busy: true,
+        });
+        const res = await this.wizard.syncClipboardToRemote(
+          this.getWizardTargetConfig(ownerProfile),
+          token,
+          "DevSpace 密码"
+        );
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "clipboard",
+          busy: false,
+        });
+        void this.panel.webview.postMessage({ type: "toast", ok: res.ok, message: res.message });
+        break;
+      }
+
+      case "wizardVerify": {
+        const target = this.getWizardTargetProfile();
+        const targetCfg = this.getWizardTargetConfig(target);
+        const isActiveTarget = target.id === this.profiles.getActiveProfile().id;
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "verify",
+          busy: true,
+          profileId: target.id,
+        });
+        if (isActiveTarget) {
+          if (this.bridge.getState().status !== "connected") {
+            await this.bridge.connect(false);
+          }
+        } else {
+          await this.bridge.ensureLocalDevspace(targetCfg);
+        }
+        const verify = await this.wizard.verifyRemoteReady(targetCfg, {
+          forwardDevspace: !isActiveTarget,
+        });
+        void this.panel.webview.postMessage({
+          type: "wizardBusy",
+          step: "verify",
+          busy: false,
+          profileId: target.id,
+        });
+        void this.panel.webview.postMessage({
+          type: "wizardVerifyResult",
+          profileId: target.id,
+          result: verify,
+        });
+        break;
+      }
+
+      case "wizardFinish": {
+        const target = this.getWizardTargetProfile();
+        const ds = this.wizard.getDesktopState();
+        const ownerProfile =
+          (ds.profileId && this.profiles.getProfileById(ds.profileId)) || target;
+        await this.wizard.stopRemoteLoginDesktop(this.getWizardTargetConfig(ownerProfile));
+
+        const switched = target.id !== this.profiles.getActiveProfile().id;
+        if (switched) {
+          await this.profiles.switchProfile(target.id);
+          await this.bridge.connect(true);
+        } else {
+          await this.bridge.connect(false);
+        }
+        this.syncState();
+        await vscode.commands.executeCommand("claudeBridge.openChat");
+        break;
+      }
+
       case "save": {
-        const form = (msg.config as Partial<BridgeConfig> | undefined) ?? {};
+        const form = (msg.config as (Partial<BridgeConfig> & { profileName?: string }) | undefined) ?? {};
         const reconnect = Boolean(msg.reconnect);
         await this.saveConfig(form, reconnect);
+        break;
+      }
+
+      case "createProfile": {
+        const name = String(msg.name ?? "").trim();
+        const created = await this.profiles.createProfile(name);
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: true,
+          message: `已新建并切换到服务器档案「${created.name}」，可安全填写新 VPS 信息，不影响原主力机。`,
+        });
+        break;
+      }
+
+      case "selectProfile": {
+        const pid = String(msg.profileId ?? "");
+        const reconnect = Boolean(msg.reconnect);
+        const switched = await this.profiles.switchProfile(pid);
+        if (!switched) {
+          return;
+        }
+        this.syncState();
+        if (reconnect && switched.sshHost && switched.sshKeyPath) {
+          const ok = await this.bridge.connect(true);
+          void this.panel.webview.postMessage({
+            type: "toast",
+            ok,
+            message: ok
+              ? `已切换到「${switched.name}」并连接成功。`
+              : `已切换到「${switched.name}」，但连接失败：${this.bridge.getState().detail}`,
+          });
+        } else {
+          void this.panel.webview.postMessage({
+            type: "toast",
+            ok: true,
+            message: `已切换到服务器档案「${switched.name}」。`,
+          });
+        }
+        break;
+      }
+
+      case "deleteProfile": {
+        const pid = String(msg.profileId ?? "");
+        const res = await this.profiles.deleteProfile(pid);
+        if (this.wizardTargetProfileId === pid) {
+          this.wizardTargetProfileId = this.profiles.getActiveProfile().id;
+        }
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
         break;
       }
 
@@ -251,7 +780,7 @@ export class SettingsPanel {
   }
 
   private async saveConfig(
-    raw: Partial<BridgeConfig>,
+    raw: Partial<BridgeConfig> & { profileName?: string },
     reconnect: boolean
   ): Promise<void> {
     const patch: Partial<BridgeConfig> = {
@@ -278,6 +807,16 @@ export class SettingsPanel {
     };
 
     await updateBridgeConfigValues(patch);
+    await this.profiles.saveProfile({
+      name: raw.profileName,
+      sshHost: patch.sshHost,
+      sshUser: patch.sshUser,
+      sshPort: patch.sshPort,
+      sshKeyPath: patch.sshKeyPath,
+      sshProxy: patch.sshProxy,
+      remotePort: patch.remotePort,
+      remoteClaudePath: patch.remoteClaudePath,
+    });
     this.syncState();
 
     if (reconnect) {
@@ -433,12 +972,32 @@ export class SettingsPanel {
 
     <div id="toastBar" class="toast-bar"></div>
 
+    <nav class="tab-bar">
+      <button type="button" class="tab-btn active" data-tab="general">常规设置与记忆</button>
+      <button type="button" class="tab-btn" data-tab="wizard">新机配置向导 (4 步部署)</button>
+    </nav>
+
+    <div id="tab-general" class="tab-pane active">
     <!-- 卡片 1：远程服务器与隧道 -->
     <section class="card" id="section-server">
       <div class="card-head">
         <div>
-          <h2>远程服务器与隧道</h2>
-          <p class="card-desc">配置远程 Linux / VPS 服务器 SSH 信息与代理策略，所有配置自动写入正确作用域。</p>
+          <h2>远程服务器与隧道（支持多 VPS 切换）</h2>
+          <p class="card-desc">可维护多台 VPS / 多个 Claude 账号，互不覆盖；本地 DevSpace 共用，点一下即可秒切服务器。</p>
+        </div>
+      </div>
+
+      <div class="profile-bar-wrap">
+        <div id="profileBar" class="profile-bar"></div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field span-2">
+          <label for="profileName">当前服务器档案名称</label>
+          <input id="profileName" type="text" placeholder="例如 AWS 主力 / RAKsmart 备用" />
+        </div>
+        <div class="field" style="justify-content: flex-end;">
+          <button id="deleteProfileBtn" class="btn secondary small" type="button" style="height: 33px;">删除此档案</button>
         </div>
       </div>
 
@@ -639,6 +1198,198 @@ export class SettingsPanel {
         </div>
       </div>
     </details>
+    </div>
+
+    <!-- Tab 2：新机配置向导（4 步图形化一键部署） -->
+    <div id="tab-wizard" class="tab-pane">
+      <!-- Step 1 -->
+      <section class="card">
+        <div class="step-head">
+          <span class="step-num">1</span>
+          <div>
+            <h2>本机 DevSpace 一键准备</h2>
+            <p class="card-desc">自动检查 Node、安装 DevSpace、授权本地代码目录、关闭本地 subagents 并设置 365 天免重输密码。</p>
+          </div>
+        </div>
+        <div id="wizLocalChecklist" class="checklist"></div>
+        <div class="field">
+          <label for="wizProjectRoot">授权给 DevSpace 的本地项目根目录</label>
+          <div class="input-with-btn">
+            <input id="wizProjectRoot" type="text" placeholder="例如 /home/you/project 或 D:\projects" />
+            <button id="wizPickRootBtn" class="btn secondary small" type="button">选择文件夹</button>
+            <button id="wizSetupLocalBtn" class="btn primary small" type="button">一键安装并初始化</button>
+          </div>
+        </div>
+        <div id="wizPasswordRow" class="password-box" style="display:none;">
+          <span class="pw-label">DevSpace Owner Password：</span>
+          <code id="wizOwnerPw" class="pw-val">••••••••</code>
+          <button id="wizTogglePwBtn" class="btn secondary small" type="button">显示</button>
+          <button id="wizCopyPwBtn" class="btn secondary small" type="button">复制密码</button>
+        </div>
+        <pre id="wizLocalLog" class="wizard-log"></pre>
+      </section>
+
+      <!-- Step 2 -->
+      <section class="card">
+        <div class="step-head">
+          <span class="step-num">2</span>
+          <div>
+            <h2>新 VPS 免密配置与一键装机</h2>
+            <p class="card-desc">点「+ 新增服务器档案」只在向导里配新机，不会切换你正在聊天的「主力服务器」，各服务器日志完全隔离。</p>
+          </div>
+        </div>
+
+        <div class="profile-bar-wrap">
+          <div id="wizProfileBar" class="profile-bar"></div>
+        </div>
+
+        <div id="wizTargetBanner" class="target-banner"></div>
+
+        <div class="target-mini-form">
+          <div class="grid-3">
+            <div class="field">
+              <label for="wizTargetName">目标档案名称</label>
+              <input id="wizTargetName" type="text" placeholder="例如 RAKsmart / 备用机" />
+            </div>
+            <div class="field">
+              <label for="wizTargetHost">目标服务器地址 (IP / 域名)</label>
+              <input id="wizTargetHost" type="text" placeholder="例如 1.2.3.4" />
+            </div>
+            <div class="field">
+              <label for="wizTargetPort">SSH 端口</label>
+              <input id="wizTargetPort" type="number" min="1" max="65535" placeholder="22" />
+            </div>
+          </div>
+          <div class="grid-3">
+            <div class="field">
+              <label for="wizTargetUser">SSH 用户名</label>
+              <input id="wizTargetUser" type="text" placeholder="ubuntu 或 claude" />
+            </div>
+            <div class="field span-2">
+              <label for="wizTargetKeyPath">目标本地私钥 (.pem / 无私钥请展开下方用密码一键生成)</label>
+              <div class="input-with-btn">
+                <input id="wizTargetKeyPath" type="text" placeholder="例如 ~/.ssh/claude-bridge_x.x.x.x" />
+                <button id="wizPickKeyBtn" class="btn secondary small" type="button">选择私钥</button>
+                <button id="wizSaveTargetBtn" class="btn secondary small" type="button">保存参数</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <details class="sub-expander" id="passwordlessBox">
+          <summary>没有 .pem 私钥？用密码一键生成免密私钥（支持 root 自动创建普通用户）</summary>
+          <div class="sub-expander-body">
+            <div class="grid-3">
+              <div class="field span-2">
+                <label for="pwHost">VPS 地址 (IP / 域名)</label>
+                <input id="pwHost" type="text" placeholder="留空则沿用上方目标服务器地址" />
+              </div>
+              <div class="field">
+                <label for="pwPort">SSH 端口</label>
+                <input id="pwPort" type="number" min="1" max="65535" placeholder="22" />
+              </div>
+            </div>
+            <div class="grid-3">
+              <div class="field">
+                <label for="pwUser">初始用户名</label>
+                <input id="pwUser" type="text" value="root" placeholder="root 或 ubuntu" />
+              </div>
+              <div class="field span-2">
+                <label for="pwPassword">一次性登录密码（仅用于此次上传公钥，绝不保存）</label>
+                <input id="pwPassword" type="password" autocomplete="off" placeholder="输入 VPS 登录密码" />
+              </div>
+            </div>
+            <div class="grid-2" id="pwNonRootRow">
+              <div class="field" style="justify-content:center;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input id="pwCreateNonRoot" type="checkbox" checked />
+                  <span>root 登录时自动创建普通用户（避免 Claude 禁止 root 全部允许模式）</span>
+                </label>
+              </div>
+              <div class="field">
+                <label for="pwNewUserName">新建普通用户名</label>
+                <input id="pwNewUserName" type="text" value="claude" placeholder="claude" />
+              </div>
+            </div>
+            <div class="inline-actions">
+              <button id="wizPasswordlessBtn" class="btn primary small" type="button">用密码一键配置免密登录</button>
+            </div>
+            <pre id="wizPasswordlessLog" class="wizard-log"></pre>
+          </div>
+        </details>
+
+        <div class="grid-3">
+          <div class="field">
+            <label for="wizTimezone">VPS 地区时区</label>
+            <select id="wizTimezone">
+              <option value="America/New_York">美东 (America/New_York)</option>
+              <option value="America/Los_Angeles">美西 (America/Los_Angeles)</option>
+              <option value="Europe/London">欧洲 (Europe/London)</option>
+              <option value="Asia/Tokyo">日本 (Asia/Tokyo)</option>
+              <option value="Asia/Singapore">新加坡 (Asia/Singapore)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="wizGeometry">临时桌面最大分辨率</label>
+            <select id="wizGeometry">
+              <option value="1366x768">1366 × 768（推荐上限）</option>
+              <option value="1280x720">1280 × 720（更省带宽）</option>
+            </select>
+          </div>
+          <div class="field" style="justify-content: flex-end;">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px;">
+              <input id="wizWithDesktop" type="checkbox" checked />
+              <span>安装极简 noVNC 登录桌面</span>
+            </label>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button id="wizSetupVpsBtn" class="btn primary" type="button">一键初始化远程 VPS</button>
+          <span id="wizStep2Target" class="target-inline-tag"></span>
+        </div>
+        <pre id="wizVpsLog" class="wizard-log"></pre>
+      </section>
+
+      <!-- Step 3 -->
+      <section class="card">
+        <div class="step-head">
+          <span class="step-num">3</span>
+          <div>
+            <h2>免客户端打开远程登录画面（一次性授权）</h2>
+            <p class="card-desc">无需安装 RustDesk！在远程终端输入 <code>claude</code> 登录账号，再输入 <code>/mcp</code> 授权 DevSpace。需要粘贴时点下方「同步本机剪贴板到远程」，浏览器按 <code>Ctrl+V</code>、终端按 <code>Ctrl+Shift+V</code> 即可。</p>
+          </div>
+        </div>
+        <div id="wizDesktopStatus" class="field-hint">当前状态：未启动（平时 0 内存占用）</div>
+        <div class="inline-actions">
+          <button id="wizStartDesktopBtn" class="btn primary" type="button">打开远程登录画面（网页直连）</button>
+          <button id="wizReopenDesktopBtn" class="btn secondary small" type="button" style="display:none;">重新打开浏览器</button>
+          <button id="wizStopDesktopBtn" class="btn secondary small" type="button" style="display:none;">关闭临时桌面释放内存</button>
+        </div>
+        <div class="clipboard-bar">
+          <span class="clip-hint">远程粘贴助手（按需点一次同步，不在后台监听）：</span>
+          <button id="wizSyncClipboardBtn" class="btn secondary small" type="button">同步本机剪贴板到远程</button>
+          <button id="wizSendPwToRemoteBtn" class="btn secondary small" type="button">一键发 DevSpace 密码到远程</button>
+          <button id="wizCopyPwBtn2" class="btn secondary small" type="button">复制 DevSpace 密码</button>
+        </div>
+      </section>
+
+      <!-- Step 4 -->
+      <section class="card">
+        <div class="step-head">
+          <span class="step-num">4</span>
+          <div>
+            <h2>一键验收并切换到此服务器</h2>
+            <p class="card-desc">检查当前目标 VPS 的 Claude 登录与 DevSpace MCP 是否全部绿灯；验收通过后再关闭临时桌面并切换到此服务器对话。</p>
+          </div>
+        </div>
+        <div id="wizVerifyChecklist" class="checklist"></div>
+        <div id="wizVerifySummary" class="field-hint"></div>
+        <div class="inline-actions">
+          <button id="wizVerifyBtn" class="btn secondary" type="button">一键检测授权状态</button>
+          <button id="wizFinishBtn" class="btn primary" type="button">关闭临时桌面并开始对话</button>
+        </div>
+      </section>
+    </div>
   </div>
 
   <script nonce="${nonce}" src="${jsUri}"></script>

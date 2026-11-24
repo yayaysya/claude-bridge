@@ -14,6 +14,17 @@ const extensionOptions = {
   minify: !isWatch,
 };
 
+const proxyBridgeOptions = {
+  entryPoints: ["src/proxyBridge.ts"],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node18",
+  outfile: "dist/proxyBridge.js",
+  sourcemap: false,
+  minify: !isWatch,
+};
+
 const webviewOptions = {
   entryPoints: ["media/webview.js"],
   bundle: true,
@@ -37,18 +48,27 @@ const settingsOptions = {
 };
 
 if (isWatch) {
-  const [extCtx, webCtx, setCtx] = await Promise.all([
+  const [extCtx, proxyCtx, webCtx, setCtx] = await Promise.all([
     esbuild.context(extensionOptions),
+    esbuild.context(proxyBridgeOptions),
     esbuild.context(webviewOptions),
     esbuild.context(settingsOptions),
   ]);
-  await Promise.all([extCtx.watch(), webCtx.watch(), setCtx.watch()]);
+  await Promise.all([
+    extCtx.watch(),
+    proxyCtx.watch(),
+    webCtx.watch(),
+    setCtx.watch(),
+  ]);
   console.log("Watching for changes...");
 } else {
   await Promise.all([
     esbuild.build(extensionOptions),
+    esbuild.build(proxyBridgeOptions),
     esbuild.build(webviewOptions),
     esbuild.build(settingsOptions),
   ]);
-  console.log("Build complete: dist/extension.js, dist/webview.js, dist/settings.js");
+  console.log(
+    "Build complete: dist/extension.js, dist/proxyBridge.js, dist/webview.js, dist/settings.js"
+  );
 }

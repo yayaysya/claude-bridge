@@ -136,6 +136,182 @@ export class ClaudeClient {
     });
   }
 
+  /**
+   * 请远程 Claude 压缩提炼一份精简中文记忆摘要（不调用工具）：
+   * - warm-resume：缓存尚热（<55 分钟），复用原会话命中 1 折热缓存；
+   * - cold-stateless：缓存已失效，绝不重读几十万字冷会话，改将剥离日志后的轻量纯文本记录交给 Sonnet 独立总结（省 95%+ 额度）。
+   */
+  public async generateHandoffSummary(
+    cfg: BridgeConfig,
+    options:
+      | { mode: "warm-resume"; claudeSessionId: string }
+      | { mode: "cold-stateless"; transcript: string }
+  ): Promise<{ ok: boolean; summary?: string; reason?: string }> {
+    if (!cfg.sshHost || !cfg.sshUser || !cfg.sshKeyPath) {
+      return { ok: false, reason: "尚未配置远程服务器连接信息，无法压缩记忆。" };
+    }
+
+    const runSummaryOnce = (
+      extraArgs: string[],
+      promptText: string,
+      logLabel: string
+    ): Promise<{ ok: boolean; summary?: string; reason?: string }> => {
+      const claudeArgs = [
+        shellQuote(cfg.remoteClaudePath || "claude"),
+        "-p",
+        ...extraArgs,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "plan",
+        "--max-turns",
+        "1",
+      ];
+
+      const remoteCmd = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; exec ${claudeArgs.join(" ")}`;
+      const sshArgs = [
+        ...buildBaseSshArgs(cfg, { batchMode: true }),
+        `${cfg.sshUser}@${cfg.sshHost}`,
+        remoteCmd,
+      ];
+
+      this.output.appendLine(`[Memory] ${logLabel}`);
+
+      return new Promise((resolve) => {
+        const child = spawn("ssh", sshArgs, { stdio: ["pipe", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+
+        const finish = (res: { ok: boolean; summary?: string; reason?: string }) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(res);
+        };
+
+        const timer = setTimeout(() => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // 忽略
+          }
+          this.output.appendLine("[Memory] 远程压缩记忆超时");
+          finish({ ok: false, reason: "远程压缩记忆超时，请检查网络或刷新连接后重试。" });
+        }, 45_000);
+
+        child.stdout?.on("data", (buf: Buffer) => {
+          stdout += buf.toString("utf8");
+        });
+
+        child.stderr?.on("data", (buf: Buffer) => {
+          stderr += buf.toString("utf8");
+        });
+
+        child.on("error", (err) => {
+          finish({ ok: false, reason: `连接远程失败：${err.message}` });
+        });
+
+        child.on("close", (code) => {
+          let resultText = "";
+          let isErr = false;
+          for (const rawLine of stdout.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (!line.startsWith("{")) {
+              continue;
+            }
+            try {
+              const evt = JSON.parse(line) as Record<string, unknown>;
+              if (evt.type === "result") {
+                isErr = Boolean(evt.is_error);
+                if (typeof evt.result === "string") {
+                  resultText = evt.result.trim();
+                }
+              }
+            } catch {
+              // 忽略非 JSON 行
+            }
+          }
+          if (/hit your 5-hour limit|rate limit/i.test(resultText)) {
+            finish({
+              ok: false,
+              reason: "当前 5 小时额度已用完，等额度重置后再压缩记忆，或先点右上角「+」开空白新对话。",
+            });
+            return;
+          }
+          if (code !== 0 || isErr || !resultText) {
+            finish({
+              ok: false,
+              reason: resultText || stderr.trim() || "远程压缩记忆失败，请稍后重试。",
+            });
+            return;
+          }
+          this.output.appendLine(`[Memory] 远程压缩记忆成功 (${resultText.length} 字符)`);
+          finish({ ok: true, summary: resultText });
+        });
+
+        child.stdin?.write(promptText, "utf8");
+        child.stdin?.end();
+      });
+    };
+
+    if (options.mode === "warm-resume") {
+      if (!options.claudeSessionId) {
+        return { ok: false, reason: "当前会话尚未建立远程对话记录，无法压缩记忆。" };
+      }
+      const args = ["--resume", shellQuote(options.claudeSessionId)];
+      if (cfg.model) {
+        args.push("--model", shellQuote(cfg.model));
+      }
+      const warmPrompt = [
+        "请为即将新开的轻量对话压缩整理一份简洁的中文记忆摘要（控制在 350~500 字以内，不要调用任何工具，直接输出 Markdown 要点）：",
+        "1. 当前任务目标",
+        "2. 已确认的关键结论与已修改/涉及的文件路径",
+        "3. 尚未完成或下一步待办事项",
+      ].join("\n");
+      return runSummaryOnce(
+        args,
+        warmPrompt,
+        "缓存尚热，正在请原会话低成本压缩记忆..."
+      );
+    }
+
+    // 冷缓存脱壳模式：严禁 --resume 旧大上下文，使用 --no-session-persistence + sonnet 轻模型只读纯文本精华
+    const coldPrompt = [
+      "下面是一段过往开发对话的纯文本精简摘录（已剥离大段日志与工具输出）。",
+      "请帮我为即将新开的对话压缩整理一份准确的中文记忆摘要（控制在 350~500 字以内，不要调用任何工具，直接输出 Markdown 要点）：",
+      "1. 当前任务目标",
+      "2. 已确认的关键技术结论与已修改/涉及的文件路径",
+      "3. 尚未完成或下一步待办事项",
+      "",
+      "--- 对话记录摘录 ---",
+      options.transcript,
+    ].join("\n");
+
+    const res = await runSummaryOnce(
+      ["--no-session-persistence", "--model", "sonnet"],
+      coldPrompt,
+      "缓存已过期，采用轻量脱壳模式（Sonnet，不重读旧大上下文）压缩记忆..."
+    );
+    // 若远端不识别 sonnet 别名（非限流错误），自动回退不指定 --model 重试一次
+    if (
+      !res.ok &&
+      res.reason &&
+      !/额度|limit/i.test(res.reason) &&
+      /model|invalid|not found/i.test(res.reason)
+    ) {
+      return runSummaryOnce(
+        ["--no-session-persistence"],
+        coldPrompt,
+        "回退默认模型继续轻量脱壳压缩记忆..."
+      );
+    }
+    return res;
+  }
+
   /** 将实时工作区快照、附加文件/选区与用户输入组装成清晰 Prompt */
   public buildPrompt(
     userText: string,
@@ -437,8 +613,25 @@ export class ClaudeClient {
             };
           };
 
-          const fiveHour = parseWin(unified?.five_hour);
-          const sevenDay = parseWin(unified?.seven_day);
+          let fiveHour = parseWin(unified?.five_hour);
+          let sevenDay = parseWin(unified?.seven_day);
+
+          // 兼容新版 CLI 在顶层直接返回 rateLimitType + utilization + resetsAt 的结构
+          if (!fiveHour && !sevenDay && typeof info.utilization === "number") {
+            const singleWin: RateLimitWindow = {
+              utilization: info.utilization,
+              resetsAt:
+                typeof info.resetsAt === "number" ? info.resetsAt : undefined,
+              status: typeof info.status === "string" ? info.status : undefined,
+            };
+            const limitType = String(info.rateLimitType ?? "");
+            if (limitType === "five_hour" || limitType === "session") {
+              fiveHour = singleWin;
+            } else if (limitType === "seven_day" || limitType === "weekly") {
+              sevenDay = singleWin;
+            }
+          }
+
           if (fiveHour || sevenDay) {
             callbacks.onQuota({
               fiveHour,
@@ -715,9 +908,15 @@ function parseUsageOutput(rawStdout: string): Partial<QuotaSnapshot> | undefined
     return undefined;
   }
 
+  const isRejected = Boolean(
+    (fiveHour && (fiveHour.utilization >= 1 || fiveHour.status === "rejected")) ||
+      (sevenDay && (sevenDay.utilization >= 1 || sevenDay.status === "rejected"))
+  );
+
   return {
     fiveHour,
     sevenDay,
+    status: isRejected ? "rejected" : "allowed",
     isUsingOverage,
     updatedAt: Date.now(),
   };
