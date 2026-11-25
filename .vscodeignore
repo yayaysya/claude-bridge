@@ -1,5 +1,6 @@
 .vscode/**
 .github/**
+scripts/**
 src/**
 setup/**
 media/webview.js
