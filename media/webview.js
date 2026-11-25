@@ -11,6 +11,8 @@ import { Marked, Renderer } from "marked";
   let historySearchTimer = null;
   let pendingJumpMessageId = null;
   let dismissedAlertKey = "";
+  let slashActiveIdx = 0;
+  let slashCandidates = [];
   let isLoadingOlder = false;
   let scrollAnchor = null;
   let suppressAutoLoadUntil = 0;
@@ -197,6 +199,8 @@ import { Marked, Renderer } from "marked";
   const historySearchClear = document.getElementById("historySearchClear");
   const historyListBody = document.getElementById("historyListBody");
   const searchHistoryBtn = document.getElementById("searchHistoryBtn");
+  const tabStrip = document.getElementById("tabStrip");
+  const slashPopover = document.getElementById("slashPopover");
   const cacheAlertBar = document.getElementById("cacheAlertBar");
   const handoffBtn = document.getElementById("handoffBtn");
   const quotaPopover = document.getElementById("quotaPopover");
@@ -266,9 +270,9 @@ import { Marked, Renderer } from "marked";
   const ICON_STOP =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2.5"/></svg>';
   const ICON_STAR =
-    '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.4 9.2L22 12L14.4 14.8L12 22L9.6 14.8L2 12L9.6 9.2L12 2Z"/></svg>';
+    '<svg width="24" height="19" viewBox="0 0 18 14" fill="currentColor" shape-rendering="crispEdges"><path fill-rule="evenodd" clip-rule="evenodd" d="M2 1H16V4H18V7H16V9H15V13H13V9H12V13H10V9H8V13H6V9H5V13H3V9H2V7H0V4H2V1ZM5 4V6H7V4H5ZM11 4V6H13V4H11Z"/></svg>';
   const ICON_STAR_SM =
-    '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.4 9.2L22 12L14.4 14.8L12 22L9.6 14.8L2 12L9.6 9.2L12 2Z"/></svg>';
+    '<svg width="16" height="13" viewBox="0 0 18 14" fill="currentColor" shape-rendering="crispEdges"><path fill-rule="evenodd" clip-rule="evenodd" d="M2 1H16V4H18V7H16V9H15V13H13V9H12V13H10V9H8V13H6V9H5V13H3V9H2V7H0V4H2V1ZM5 4V6H7V4H5ZM11 4V6H13V4H11Z"/></svg>';
   const ICON_BRANCH =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
   const ICON_COPY =
@@ -309,11 +313,13 @@ import { Marked, Renderer } from "marked";
       target.closest("#statusBtn") ||
       target.closest("#settingsBtn") ||
       target.closest("#permBtn") ||
-      target.closest("#modelBtn")
+      target.closest("#modelBtn") ||
+      target.closest("#promptInput")
     ) {
       return;
     }
     closePopovers();
+    hideSlashPopover();
   });
 
   sessionTrigger.addEventListener("click", () => {
@@ -495,8 +501,106 @@ import { Marked, Renderer } from "marked";
     vscode.postMessage({ type: "send", text });
   }
 
+  function hideSlashPopover() {
+    if (slashPopover) {
+      slashPopover.classList.remove("open");
+    }
+    slashCandidates = [];
+    slashActiveIdx = 0;
+  }
+
+  function applySlashSelection(cmd) {
+    if (!cmd) return;
+    promptInput.value = "/" + cmd.name + " ";
+    hideSlashPopover();
+    autoResize();
+    updateSendVisual();
+    scheduleDraftSave();
+    promptInput.focus();
+  }
+
+  function updateSlashPopover() {
+    if (!slashPopover) return;
+    const raw = promptInput.value || "";
+    const match = raw.match(/^\/([a-zA-Z0-9_-]*)$/);
+    if (!match) {
+      hideSlashPopover();
+      return;
+    }
+    const kw = match[1].toLowerCase();
+    const skillItems = ((currentState && currentState.skills) || []).map((sk) => ({
+      name: sk.name,
+      desc: sk.description || "本地 Skill",
+      tag: "Skill",
+    }));
+    const builtins = [
+      { name: "compact", desc: "在当前会话原地压缩上下文（官方内置）", tag: "内置" },
+    ];
+    const all = [...skillItems, ...builtins];
+    slashCandidates = all.filter(
+      (item) =>
+        !kw ||
+        item.name.toLowerCase().includes(kw) ||
+        item.desc.toLowerCase().includes(kw)
+    );
+    if (slashCandidates.length === 0) {
+      hideSlashPopover();
+      return;
+    }
+    if (slashActiveIdx >= slashCandidates.length) {
+      slashActiveIdx = 0;
+    }
+    slashPopover.innerHTML =
+      '<div class="popover-header"><span>快捷选择 Skill / 命令（↑↓ 选择，Enter 填入）</span><span>' + slashCandidates.length + "</span></div>" +
+      slashCandidates
+        .map(
+          (item, idx) =>
+            '<div class="slash-item ' + (idx === slashActiveIdx ? "active" : "") + '" data-slash-idx="' + idx + '">' +
+            '<div class="slash-item-top">' +
+            '<span class="slash-item-name">/' + escapeHtml(item.name) + "</span>" +
+            '<span class="slash-item-tag">' + escapeHtml(item.tag) + "</span>" +
+            "</div>" +
+            '<div class="slash-item-desc">' + escapeHtml(item.desc) + "</div>" +
+            "</div>"
+        )
+        .join("");
+    slashPopover.classList.add("open");
+
+    slashPopover.querySelectorAll("[data-slash-idx]").forEach((el) => {
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const idx = Number(el.dataset.slashIdx);
+        applySlashSelection(slashCandidates[idx]);
+      });
+    });
+  }
+
   sendBtn.addEventListener("click", triggerSend);
   promptInput.addEventListener("keydown", (e) => {
+    if (slashPopover && slashPopover.classList.contains("open") && slashCandidates.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        slashActiveIdx = (slashActiveIdx + 1) % slashCandidates.length;
+        updateSlashPopover();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        slashActiveIdx = (slashActiveIdx - 1 + slashCandidates.length) % slashCandidates.length;
+        updateSlashPopover();
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing)) {
+        e.preventDefault();
+        applySlashSelection(slashCandidates[slashActiveIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        hideSlashPopover();
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       triggerSend();
@@ -506,6 +610,7 @@ import { Marked, Renderer } from "marked";
     autoResize();
     updateSendVisual();
     scheduleDraftSave();
+    updateSlashPopover();
   });
   promptInput.addEventListener("blur", () => {
     flushDraftNow();
@@ -691,68 +796,66 @@ import { Marked, Renderer } from "marked";
     }
   }
 
+  const THEME_OPTIONS = [
+    { value: "claude", label: "Claude", color: "#d97757" },
+    { value: "wechat", label: "微信", color: "#07c160" },
+    { value: "feishu", label: "飞书", color: "#3370ff" },
+    { value: "vscode", label: "跟随 VS Code", color: "#8e8e93" },
+  ];
+
+  function applyChatTheme(theme) {
+    const valid = THEME_OPTIONS.some((t) => t.value === theme) ? theme : "claude";
+    document.body.dataset.theme = valid;
+  }
+
   function renderSettingsPopover(state) {
     const syncOn = Boolean(state.syncLocalRules);
+    const activeTheme = state.chatTheme || "claude";
+    const themeChipsHtml = THEME_OPTIONS.map((t) => {
+      const sel = t.value === activeTheme;
+      return (
+        '<button type="button" class="theme-chip ' + (sel ? "active" : "") + '" data-chat-theme="' + t.value + '">' +
+        '<span class="theme-dot" style="background:' + t.color + '"></span>' +
+        "<span>" + t.label + "</span>" +
+        "</button>"
+      );
+    }).join("");
+
     settingsPopover.innerHTML =
-      '<div class="setting-row" id="openLocalRulesRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">打开本地 CLAUDE.md</span>' +
-      '<span class="setting-row-desc">在编辑器中查看或修改个人规则</span>' +
-      "</div>" +
-      "</div>" +
-      '<div class="setting-row" id="viewRemoteMemRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">查看/备份远程 Claude 记忆</span>' +
-      '<span class="setting-row-desc">拉取远程自动记住的编码习惯</span>' +
-      "</div>" +
-      "</div>" +
-      '<div class="setting-row" id="toggleSyncRulesRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">自动同步本地 CLAUDE.md</span>' +
-      '<span class="setting-row-desc">连接远程时仅在有变化时无损同步</span>' +
-      "</div>" +
-      '<span class="switch ' + (syncOn ? "on" : "") + '"></span>' +
+      '<div class="theme-picker-block">' +
+      '<div class="theme-picker-title">界面主题（含 Markdown 样式）</div>' +
+      '<div class="theme-picker-grid">' + themeChipsHtml + "</div>" +
       "</div>" +
       '<div class="popover-divider"></div>' +
+      '<div class="setting-row" id="openFullSettingsRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">打开可视化设置中心...</span>' +
+      '<span class="setting-row-desc">服务器、规则、Skill 库、记忆与习惯提炼</span>' +
+      "</div>" +
+      "</div>" +
+      '<div class="setting-row" id="openWizardRow">' +
+      '<div class="setting-row-text">' +
+      '<span class="setting-row-title">新机配置向导 (4 步部署)</span>' +
+      '<span class="setting-row-desc">一键配置新 VPS 与免客户端网页登录画面</span>' +
+      "</div>" +
+      "</div>" +
       '<div class="setting-row" id="openLogFileRow">' +
       '<div class="setting-row-text">' +
       '<span class="setting-row-title">查看诊断日志 (bridge.log)</span>' +
       '<span class="setting-row-desc">排查断线原因、网络耗时与代理状态</span>' +
       "</div>" +
-      "</div>" +
-      '<div class="setting-row" id="openFullSettingsRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">打开可视化设置中心...</span>' +
-      '<span class="setting-row-desc">服务器、代理、测试连接、规则与记忆</span>' +
-      "</div>" +
-      "</div>" +
-      '<div class="setting-row" id="openWizardRow">' +
-      '<div class="setting-row-text">' +
-      '<span class="setting-row-title">新机配置向导 (一键部署)</span>' +
-      '<span class="setting-row-desc">4 步初始化新 VPS 与网页临时登录画面</span>' +
-      "</div>" +
       "</div>";
 
-    const openLocalRow = document.getElementById("openLocalRulesRow");
-    if (openLocalRow) {
-      openLocalRow.addEventListener("click", () => {
-        closePopovers();
-        vscode.postMessage({ type: "openLocalRules" });
+    settingsPopover.querySelectorAll("[data-chat-theme]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextTheme = btn.dataset.chatTheme || "claude";
+        applyChatTheme(nextTheme);
+        if (currentState) currentState.chatTheme = nextTheme;
+        renderSettingsPopover(currentState || { chatTheme: nextTheme });
+        vscode.postMessage({ type: "setChatTheme", theme: nextTheme });
       });
-    }
-    const viewMemRow = document.getElementById("viewRemoteMemRow");
-    if (viewMemRow) {
-      viewMemRow.addEventListener("click", () => {
-        closePopovers();
-        vscode.postMessage({ type: "viewRemoteMemories" });
-      });
-    }
-    const toggleRow = document.getElementById("toggleSyncRulesRow");
-    if (toggleRow) {
-      toggleRow.addEventListener("click", () => {
-        vscode.postMessage({ type: "toggleSyncLocalRules", enabled: !syncOn });
-      });
-    }
+    });
+
     const openLogRow = document.getElementById("openLogFileRow");
     if (openLogRow) {
       openLogRow.addEventListener("click", () => {
@@ -1201,7 +1304,64 @@ import { Marked, Renderer } from "marked";
     });
   }
 
+  function renderTabStrip(state) {
+    if (!tabStrip) return;
+    const tabs = state.openTabs || [];
+    if (tabs.length < 2) {
+      tabStrip.style.display = "none";
+      return;
+    }
+    const activeId = (state.activeSession && state.activeSession.id) || "";
+    tabStrip.style.display = "flex";
+    tabStrip.innerHTML =
+      tabs
+        .map((t) => {
+          const isAct = t.id === activeId;
+          const dotHtml = t.isRunning ? '<span class="tab-run-dot" title="后台回复中"></span>' : "";
+          return (
+            '<div class="chat-tab ' + (isAct ? "active" : "") + '" data-tab-sid="' + escapeHtml(t.id) + '" title="' + escapeHtml(t.title) + '">' +
+            dotHtml +
+            '<span class="chat-tab-title">' + escapeHtml(t.title) + "</span>" +
+            '<button type="button" class="chat-tab-close" data-close-tab="' + escapeHtml(t.id) + '" title="关闭此标签（仅收起，不删历史记录）">×</button>' +
+            "</div>"
+          );
+        })
+        .join("") +
+      '<button type="button" class="chat-tab-add" id="tabAddBtn" title="新开一个对话标签">+</button>';
+
+    tabStrip.querySelectorAll("[data-tab-sid]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        if (e.target && e.target.closest("[data-close-tab]")) return;
+        const sid = el.dataset.tabSid;
+        if (sid && sid !== activeId) {
+          flushDraftNow();
+          vscode.postMessage({ type: "selectSession", sessionId: sid });
+        }
+      });
+    });
+    tabStrip.querySelectorAll("[data-close-tab]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const sid = btn.dataset.closeTab;
+        if (sid) {
+          flushDraftNow();
+          vscode.postMessage({ type: "closeTab", sessionId: sid });
+        }
+      });
+    });
+    const addBtn = document.getElementById("tabAddBtn");
+    if (addBtn) {
+      addBtn.addEventListener("click", () => {
+        flushDraftNow();
+        vscode.postMessage({ type: "newSession" });
+      });
+    }
+  }
+
   function render(state) {
+    applyChatTheme(state.chatTheme || "claude");
+    renderTabStrip(state);
+
     // 首次加载或切换会话时，还原该会话持久化保存的草稿文本（防重载窗口丢失）
     const activeSid = state.activeSession && state.activeSession.id;
     if (activeSid && activeSid !== lastLoadedSessionId) {
@@ -1628,10 +1788,14 @@ import { Marked, Renderer } from "marked";
             .join("") +
           "</div>";
       }
+      const timeHtml = m.timestamp
+        ? '<div class="msg-user-time">' + escapeHtml(formatShortTime(m.timestamp)) + "</div>"
+        : "";
       return (
         '<div class="msg-user-card" data-msg-id="' + escapeHtml(m.id) + '">' +
         attHtml +
         '<div class="msg-user-text">' + escapeHtml(m.text) + "</div>" +
+        timeHtml +
         "</div>"
       );
     }

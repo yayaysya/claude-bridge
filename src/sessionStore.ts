@@ -113,6 +113,7 @@ interface PersistedWorkspaceFile {
   version: number;
   workspacePath: string;
   activeSessionId?: string;
+  openTabIds?: string[];
   sessions: ChatSession[];
 }
 
@@ -160,6 +161,7 @@ export function resolveWorkspaceSessionFile(workspacePath?: string): {
 export class SessionStore {
   private sessions: ChatSession[] = [];
   private activeSessionId: string | undefined;
+  private openTabIds: string[] = [];
   private workspacePath = "";
   private sessionFilePath = "";
   private quotasByProfile: Record<string, QuotaSnapshot> = {};
@@ -183,11 +185,17 @@ export class SessionStore {
     this.sessionFilePath = resolved.filePath;
     this.sessions = [];
     this.activeSessionId = undefined;
+    this.openTabIds = [];
 
     const fileData = this.loadWorkspaceFile(this.sessionFilePath);
     if (fileData && fileData.sessions.length > 0) {
       this.sessions = fileData.sessions;
       this.activeSessionId = fileData.activeSessionId;
+      this.openTabIds = Array.isArray(fileData.openTabIds)
+        ? fileData.openTabIds.filter((id) =>
+            this.sessions.some((s) => s.id === id)
+          )
+        : [];
     } else {
       // 仅当旧版全局 sessions.json 存在且内容归属当前项目时认领迁移，绝不污染其他新项目
       const migrated = this.tryMigrateLegacyFileForWorkspace(this.workspacePath);
@@ -205,7 +213,10 @@ export class SessionStore {
       !this.sessions.some((s) => s.id === this.activeSessionId)
     ) {
       this.activeSessionId = this.sessions[0].id;
+      this.ensureTabOpen(this.activeSessionId);
       this.persistSessions();
+    } else {
+      this.ensureTabOpen(this.activeSessionId);
     }
   }
 
@@ -275,12 +286,61 @@ export class SessionStore {
     return this.sessions.find((s) => s.id === sessionId);
   }
 
+  /** 获取当前顶部标签栏打开的会话列表（保持标签顺序） */
+  public getOpenTabs(): ChatSession[] {
+    this.openTabIds = this.openTabIds.filter((id) =>
+      this.sessions.some((s) => s.id === id)
+    );
+    if (this.activeSessionId && !this.openTabIds.includes(this.activeSessionId)) {
+      this.openTabIds.push(this.activeSessionId);
+    }
+    return this.openTabIds
+      .map((id) => this.sessions.find((s) => s.id === id))
+      .filter((s): s is ChatSession => Boolean(s));
+  }
+
+  /** 将指定会话加入顶部标签栏（最多保留 8 个，避免拥挤） */
+  private ensureTabOpen(sessionId: string): void {
+    if (!sessionId) {
+      return;
+    }
+    if (!this.openTabIds.includes(sessionId)) {
+      this.openTabIds.push(sessionId);
+      if (this.openTabIds.length > 8) {
+        const dropIdx = this.openTabIds.findIndex(
+          (id) => id !== this.activeSessionId && id !== sessionId
+        );
+        if (dropIdx >= 0) {
+          this.openTabIds.splice(dropIdx, 1);
+        }
+      }
+    }
+  }
+
+  /** 仅从顶部标签栏关闭该标签，绝不删除底层会话历史记录 */
+  public closeTab(sessionId: string, profileId?: string): ChatSession {
+    const idx = this.openTabIds.indexOf(sessionId);
+    if (idx >= 0) {
+      this.openTabIds.splice(idx, 1);
+    }
+    if (this.openTabIds.length === 0) {
+      return this.createSession(profileId);
+    }
+    if (this.activeSessionId === sessionId) {
+      const nextIdx = Math.min(idx, this.openTabIds.length - 1);
+      this.activeSessionId = this.openTabIds[Math.max(0, nextIdx)];
+    }
+    this.persistSessions();
+    return this.getActiveSession();
+  }
+
   public setActiveSession(sessionId: string): ChatSession | undefined {
     const found = this.sessions.find((s) => s.id === sessionId);
     if (!found) {
       return undefined;
     }
     this.activeSessionId = found.id;
+    this.ensureTabOpen(found.id);
     this.persistSessions();
     return found;
   }
@@ -302,6 +362,7 @@ export class SessionStore {
       this.sessions = this.sessions.slice(0, MAX_SESSIONS);
     }
     this.activeSessionId = session.id;
+    this.ensureTabOpen(session.id);
     this.persistSessions();
     return session;
   }
@@ -325,6 +386,7 @@ export class SessionStore {
       .sort((a, b) => b.updatedAt - a.updatedAt);
     if (candidates.length > 0) {
       this.activeSessionId = candidates[0].id;
+      this.ensureTabOpen(this.activeSessionId);
       this.persistSessions();
       return candidates[0];
     }
@@ -333,11 +395,13 @@ export class SessionStore {
 
   public deleteSession(sessionId: string): ChatSession {
     this.sessions = this.sessions.filter((s) => s.id !== sessionId);
+    this.openTabIds = this.openTabIds.filter((id) => id !== sessionId);
     if (this.sessions.length === 0) {
       return this.createSession();
     }
     if (this.activeSessionId === sessionId) {
-      this.activeSessionId = this.sessions[0].id;
+      this.activeSessionId = this.openTabIds[0] || this.sessions[0].id;
+      this.ensureTabOpen(this.activeSessionId);
     }
     this.persistSessions();
     return this.getActiveSession();
@@ -477,6 +541,7 @@ export class SessionStore {
       version: 2,
       workspacePath: this.workspacePath,
       activeSessionId: this.activeSessionId,
+      openTabIds: this.openTabIds,
       sessions: this.sessions,
     };
     this.atomicWriteJson(this.sessionFilePath, payload);

@@ -38,6 +38,9 @@ export type PermissionMode =
 /** 远程 Claude Code 支持的思考强度档位（空字符串表示跟随默认） */
 export type EffortLevel = "" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/** 聊天面板与设置中心内置完整视觉主题 */
+export type ChatTheme = "claude" | "wechat" | "feishu" | "vscode";
+
 /** 插件核心运行配置 */
 export interface BridgeConfig {
   sshHost: string;
@@ -52,11 +55,13 @@ export interface BridgeConfig {
   permissionMode: PermissionMode;
   model: string;
   effort: EffortLevel;
+  chatTheme: ChatTheme;
   autoConnect: boolean;
   autoReconnect: boolean;
   keepRunningOnClose: boolean;
   autoAttachWorkspaceContext: boolean;
   syncLocalRules: boolean;
+  syncLocalSkills: boolean;
   localClaudeMdPaths: string[];
 }
 
@@ -129,6 +134,12 @@ export function getBridgeConfig(): BridgeConfig {
     ? (effortRaw as EffortLevel)
     : "";
 
+  const themeRaw = readCompat<string>(cfg, legacy, "chatTheme", "claude").trim();
+  const validThemes: ChatTheme[] = ["claude", "wechat", "feishu", "vscode"];
+  const resolvedTheme: ChatTheme = validThemes.includes(themeRaw as ChatTheme)
+    ? (themeRaw as ChatTheme)
+    : "claude";
+
   return {
     sshHost: readCompat<string>(cfg, legacy, "sshHost", "").trim(),
     sshUser: readCompat<string>(cfg, legacy, "sshUser", "ubuntu").trim(),
@@ -151,6 +162,7 @@ export function getBridgeConfig(): BridgeConfig {
     permissionMode: resolvedMode,
     model: readCompat<string>(cfg, legacy, "model", "").trim(),
     effort: resolvedEffort,
+    chatTheme: resolvedTheme,
     autoConnect: readCompat<boolean>(cfg, legacy, "autoConnect", true),
     autoReconnect: readCompat<boolean>(cfg, legacy, "autoReconnect", true),
     keepRunningOnClose: readCompat<boolean>(
@@ -166,6 +178,7 @@ export function getBridgeConfig(): BridgeConfig {
       true
     ),
     syncLocalRules: readCompat<boolean>(cfg, legacy, "syncLocalRules", false),
+    syncLocalSkills: readCompat<boolean>(cfg, legacy, "syncLocalSkills", true),
     localClaudeMdPaths: readCompat<string[]>(cfg, legacy, "localClaudeMdPaths", [
       "~/.claude/CLAUDE.md",
     ]),
@@ -201,9 +214,19 @@ export async function updateEffort(effort: EffortLevel): Promise<void> {
   await updateBridgeConfigValues({ effort });
 }
 
+/** 更新聊天面板配色主题 */
+export async function updateChatTheme(chatTheme: ChatTheme): Promise<void> {
+  await updateBridgeConfigValues({ chatTheme });
+}
+
 /** 更新全局自动同步本地 CLAUDE.md 开关 */
 export async function updateSyncLocalRules(enabled: boolean): Promise<void> {
   await updateBridgeConfigValues({ syncLocalRules: enabled });
+}
+
+/** 更新全局自动同步本地 Skill 开关 */
+export async function updateSyncLocalSkills(enabled: boolean): Promise<void> {
+  await updateBridgeConfigValues({ syncLocalSkills: enabled });
 }
 
 /** 解析后的 SSH 代理配置 */

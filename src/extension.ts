@@ -12,6 +12,7 @@ import { MemoryManager } from "./memoryManager";
 import { SettingsPanel } from "./settingsPanel";
 import { SetupWizardManager } from "./setupWizard";
 import { ProfileStore } from "./profileStore";
+import { SkillManager } from "./skillManager";
 
 let bridgeManager: BridgeManager | undefined;
 let terminalManager: TerminalManager | undefined;
@@ -28,6 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const rulesSync = new RulesSyncManager(logger, context.globalState);
   const memoryManager = new MemoryManager(logger);
   const wizardManager = new SetupWizardManager(logger);
+  const skillManager = new SkillManager(logger);
   const chatProvider = new ChatViewProvider(
     context.extensionUri,
     bridgeManager,
@@ -35,7 +37,8 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionStore,
     terminalManager,
     rulesSync,
-    profileStore
+    profileStore,
+    skillManager
   );
 
   // 注册左侧 Agent 聊天面板
@@ -99,6 +102,9 @@ export function activate(context: vscode.ExtensionContext): void {
         if (cfg.syncLocalRules) {
           void rulesSync.sync(cfg, { force: false });
         }
+        if (cfg.syncLocalSkills) {
+          void skillManager.syncToRemote(cfg, { force: false });
+        }
       }
       prevBridgeStatus = st.status;
     })
@@ -106,7 +112,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const openSettingsPanel = (
     focusSection?: "server" | "memory",
-    initialTab?: "general" | "wizard"
+    initialTab?: "server" | "knowledge" | "preferences" | "wizard"
   ) =>
     SettingsPanel.show({
       extensionUri: context.extensionUri,
@@ -115,6 +121,8 @@ export function activate(context: vscode.ExtensionContext): void {
       memory: memoryManager,
       wizard: wizardManager,
       profiles: profileStore,
+      skills: skillManager,
+      sessions: sessionStore,
       logger,
       focusSection,
       initialTab,
@@ -205,7 +213,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand("claudeBridge.openSettings", () => {
-      openSettingsPanel("server", "general");
+      openSettingsPanel("server", "server");
     }),
 
     vscode.commands.registerCommand("claudeBridge.openSetupWizard", () => {
@@ -229,7 +237,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "claudeBridge.viewRemoteMemories",
       async () => {
-        const panel = openSettingsPanel("memory");
+        const panel = openSettingsPanel("memory", "knowledge");
         await panel.triggerPullMemories();
       }
     ),

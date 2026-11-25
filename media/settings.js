@@ -159,6 +159,11 @@
   const testConnBtn = $("testConnBtn");
   const pullMemoriesBtn = $("pullMemoriesBtn");
   const memoriesList = $("memoriesList");
+  const skillsList = $("skillsList");
+  const habitsList = $("habitsList");
+  const habitsApplyRow = $("habitsApplyRow");
+  const extractHabitsBtn = $("extractHabitsBtn");
+  const syncSkillsNowBtn = $("syncSkillsNowBtn");
   const rulePathsList = $("rulePathsList");
   const proxyAutoHint = $("proxyAutoHint");
   const proxyCustomWrap = $("proxyCustomWrap");
@@ -238,6 +243,64 @@
     });
   }
 
+  function renderSkills(skills) {
+    if (!skillsList) return;
+    if (!skills || skills.length === 0) {
+      skillsList.innerHTML =
+        '<div class="memory-empty">本机 ~/.claude/skills/ 暂无 Skill。点下方「+ 新建本地 Skill 模板」即可创建一个！</div>';
+      return;
+    }
+    skillsList.innerHTML = skills
+      .map(
+        (sk) =>
+          '<div class="memory-item">' +
+          '<div class="memory-info">' +
+          '<div class="memory-title">/' + escapeHtml(sk.name) + ' <span class="skill-count-tag">' + sk.fileCount + " 个文件</span></div>" +
+          '<div class="memory-preview">' + escapeHtml(sk.description || "自定义本地 Skill") + "</div>" +
+          "</div>" +
+          '<div class="memory-btns">' +
+          '<button type="button" class="btn secondary small" data-open-skill="' + escapeHtml(sk.skillFilePath) + '">编辑</button>' +
+          '<button type="button" class="btn secondary small" data-del-skill="' + escapeHtml(sk.dirName) + '">删除</button>' +
+          "</div></div>"
+      )
+      .join("");
+
+    skillsList.querySelectorAll("[data-open-skill]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        vscode.postMessage({ type: "openSkill", path: btn.dataset.openSkill });
+      });
+    });
+    skillsList.querySelectorAll("[data-del-skill]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        vscode.postMessage({ type: "deleteSkill", dirName: btn.dataset.delSkill });
+      });
+    });
+  }
+
+  function renderHabits(habits) {
+    if (!habitsList) return;
+    if (!habits || habits.length === 0) {
+      habitsList.innerHTML =
+        '<div class="memory-empty">点击右上角「开始提炼新习惯」，从你最近纠正 AI 的历史发言里筛出尚未写入 CLAUDE.md 的个人偏好。</div>';
+      if (habitsApplyRow) habitsApplyRow.style.display = "none";
+      return;
+    }
+    habitsList.innerHTML = habits
+      .map(
+        (h, idx) =>
+          '<label class="habit-item">' +
+          '<input type="checkbox" class="habit-chk" data-habit-rule="' + encodeURIComponent(h.rule) + '" checked />' +
+          '<div class="memory-info">' +
+          '<div class="memory-title">' + escapeHtml(h.title) +
+          ' <span class="skill-count-tag">' + (h.kind === "skill" ? "可拆 Skill" : "建议规则") + "</span></div>" +
+          '<div class="habit-rule-text">' + escapeHtml(h.rule) + "</div>" +
+          (h.reason ? '<div class="memory-meta">依据：' + escapeHtml(h.reason) + "</div>" : "") +
+          "</div></label>"
+      )
+      .join("");
+    if (habitsApplyRow) habitsApplyRow.style.display = "flex";
+  }
+
   function renderMemories(memories) {
     if (!memories || memories.length === 0) {
       memoriesList.innerHTML =
@@ -315,6 +378,7 @@
       keepRunningOnClose: $("keepRunningOnClose").checked,
       autoAttachWorkspaceContext: $("autoAttachWorkspaceContext").checked,
       syncLocalRules: $("syncLocalRules").checked,
+      syncLocalSkills: $("syncLocalSkills") ? $("syncLocalSkills").checked : true,
       localClaudeMdPaths: rulePaths.map((p) => p.trim()).filter(Boolean),
     };
   }
@@ -444,6 +508,60 @@
 
   $("pullMemoriesBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "pullMemories" });
+  });
+
+  if (syncSkillsNowBtn) {
+    syncSkillsNowBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "syncSkillsNow" });
+    });
+  }
+  const refreshSkillsBtn = $("refreshSkillsBtn");
+  if (refreshSkillsBtn) {
+    refreshSkillsBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "refreshSkills" });
+    });
+  }
+  const createSkillBtn = $("createSkillBtn");
+  if (createSkillBtn) {
+    createSkillBtn.addEventListener("click", () => {
+      const name = $("newSkillName").value.trim();
+      const description = $("newSkillDesc").value.trim();
+      if (!name) {
+        showToast(false, "请填写 Skill 英文标识（例如 embedded-c-review）。");
+        return;
+      }
+      vscode.postMessage({ type: "createSkill", name, description });
+      $("newSkillName").value = "";
+      $("newSkillDesc").value = "";
+    });
+  }
+  if (extractHabitsBtn) {
+    extractHabitsBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "extractHabits" });
+    });
+  }
+  const applyHabitsBtn = $("applyHabitsBtn");
+  if (applyHabitsBtn) {
+    applyHabitsBtn.addEventListener("click", () => {
+      const checked = Array.from(document.querySelectorAll(".habit-chk:checked"))
+        .map((el) => decodeURIComponent(el.dataset.habitRule || ""))
+        .filter(Boolean);
+      if (checked.length === 0) {
+        showToast(false, "请至少勾选 1 条习惯后再采纳。");
+        return;
+      }
+      vscode.postMessage({ type: "applyHabits", rules: checked });
+    });
+  }
+  document.querySelectorAll("[data-settings-theme]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const theme = btn.dataset.settingsTheme || "claude";
+      document.body.dataset.theme = theme;
+      document.querySelectorAll("[data-settings-theme]").forEach((b) => {
+        b.classList.toggle("active", b.dataset.settingsTheme === theme);
+      });
+      vscode.postMessage({ type: "setChatTheme", theme });
+    });
   });
 
   $("testConnBtn").addEventListener("click", () => {
@@ -625,6 +743,9 @@
     if (msg.type === "state") {
       const p = msg.payload;
       const cfg = p.config;
+      if (cfg && cfg.chatTheme) {
+        document.body.dataset.theme = cfg.chatTheme;
+      }
       envProxyStr = p.envProxy || "";
 
       // 状态徽标
@@ -696,6 +817,13 @@
       $("keepRunningOnClose").checked = Boolean(cfg.keepRunningOnClose);
       $("autoAttachWorkspaceContext").checked = Boolean(cfg.autoAttachWorkspaceContext);
       $("syncLocalRules").checked = Boolean(cfg.syncLocalRules);
+      if ($("syncLocalSkills")) {
+        $("syncLocalSkills").checked = cfg.syncLocalSkills !== false;
+      }
+      const activeTheme = cfg.chatTheme || "claude";
+      document.querySelectorAll("[data-settings-theme]").forEach((b) => {
+        b.classList.toggle("active", b.dataset.settingsTheme === activeTheme);
+      });
 
       const proxyRaw = (cfg.sshProxy || "auto").trim();
       const lower = proxyRaw.toLowerCase();
@@ -711,11 +839,18 @@
         ? [...cfg.localClaudeMdPaths]
         : ["~/.claude/CLAUDE.md"];
       renderRulePaths();
+      renderSkills(p.skills || []);
+      renderHabits(p.habits || []);
       renderMemories(p.memories || []);
       renderLocalChecklist(p.localStatus);
       renderDesktopState(p.desktopState);
 
-      if (p.activeTab === "wizard" || p.activeTab === "general") {
+      if (
+        p.activeTab === "server" ||
+        p.activeTab === "knowledge" ||
+        p.activeTab === "preferences" ||
+        p.activeTab === "wizard"
+      ) {
         switchTab(p.activeTab);
       }
 
@@ -835,6 +970,18 @@
     if (msg.type === "memoriesLoading") {
       pullMemoriesBtn.disabled = Boolean(msg.loading);
       pullMemoriesBtn.textContent = msg.loading ? "正在拉取..." : "拉取并备份远程记忆";
+      return;
+    }
+
+    if (msg.type === "skillsBusy" && syncSkillsNowBtn) {
+      syncSkillsNowBtn.disabled = Boolean(msg.busy);
+      syncSkillsNowBtn.textContent = msg.busy ? "正在同步 Skill..." : "立即同步 Skill 到当前 VPS";
+      return;
+    }
+
+    if (msg.type === "habitsLoading" && extractHabitsBtn) {
+      extractHabitsBtn.disabled = Boolean(msg.loading);
+      extractHabitsBtn.textContent = msg.loading ? "正在分析对话记录..." : "开始提炼新习惯";
       return;
     }
 

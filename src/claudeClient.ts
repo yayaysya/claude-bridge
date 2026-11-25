@@ -258,6 +258,22 @@ export class ClaudeClient {
       });
     };
 
+    const sharedStructureSpec = [
+      "请严格按下面 3 个固定板块输出中文 Markdown 记忆摘要（总字数控制在 600~1000 字以内，不要调用任何工具，直接输出正文）：",
+      "",
+      "### 1. 当前全局背景",
+      "- 总任务目标、已定案的关键技术结论、涉及的核心文件路径与未提交改动概况。",
+      "",
+      "### 2. 最近 3 轮对话焦点与当前进展（重点！）",
+      "- 围绕**用户最近 3 轮想做的事情**，逐轮梳理并明确标注每件事的当前状态：",
+      "  - **已完成**：哪些改动/确认已经落地到代码或文档；",
+      "  - **已定待改**：哪些用户已同意但尚未动手修改；",
+      "  - **尚未定论**：哪些疑问/设计点还在讨论、卡在哪里、待用户拍板。",
+      "",
+      "### 3. 紧接着下一步",
+      "- 明确新对话接上后最可能需要继续处理的具体事项，避免丢失当前思路。",
+    ].join("\n");
+
     if (options.mode === "warm-resume") {
       if (!options.claudeSessionId) {
         return { ok: false, reason: "当前会话尚未建立远程对话记录，无法压缩记忆。" };
@@ -267,11 +283,9 @@ export class ClaudeClient {
         args.push("--model", shellQuote(cfg.model));
       }
       const warmPrompt = [
-        "请为即将新开的轻量对话压缩整理一份简洁的中文记忆摘要（控制在 350~500 字以内，不要调用任何工具，直接输出 Markdown 要点）：",
-        "1. 当前任务目标",
-        "2. 已确认的关键结论与已修改/涉及的文件路径",
-        "3. 尚未完成或下一步待办事项",
-      ].join("\n");
+        "请为即将新开的轻量对话压缩整理一份高质量的中文记忆摘要。",
+        sharedStructureSpec,
+      ].join("\n\n");
       return runSummaryOnce(
         args,
         warmPrompt,
@@ -279,17 +293,15 @@ export class ClaudeClient {
       );
     }
 
-    // 冷缓存脱壳模式：严禁 --resume 旧大上下文，使用 --no-session-persistence + sonnet 轻模型只读纯文本精华
+    // 冷缓存脱壳模式：严禁 --resume 旧大上下文，使用 --no-session-persistence + sonnet 轻模型只读分级保真纯文本记录
     const coldPrompt = [
-      "下面是一段过往开发对话的纯文本精简摘录（已剥离大段日志与工具输出）。",
-      "请帮我为即将新开的对话压缩整理一份准确的中文记忆摘要（控制在 350~500 字以内，不要调用任何工具，直接输出 Markdown 要点）：",
-      "1. 当前任务目标",
-      "2. 已确认的关键技术结论与已修改/涉及的文件路径",
-      "3. 尚未完成或下一步待办事项",
+      "下面是一段过往开发对话的分级摘录（更早轮次已精简，最近 3 轮保留高保真内容）。",
+      "请帮我为即将新开的轻量对话压缩整理一份高质量的中文记忆摘要。",
+      sharedStructureSpec,
       "",
       "--- 对话记录摘录 ---",
       options.transcript,
-    ].join("\n");
+    ].join("\n\n");
 
     const res = await runSummaryOnce(
       ["--no-session-persistence", "--model", "sonnet"],

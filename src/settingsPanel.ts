@@ -8,12 +8,14 @@ import { BridgeManager } from "./bridgeManager";
 import {
   BridgeConfig,
   buildBaseSshArgs,
+  ChatTheme,
   EffortLevel,
   expandHomePath,
   getBridgeConfig,
   PermissionMode,
   resolveSshProxy,
   updateBridgeConfigValues,
+  updateChatTheme,
 } from "./config";
 import { BridgeLogger } from "./logger";
 import { MemoryManager, RemoteMemoryItem } from "./memoryManager";
@@ -24,6 +26,10 @@ import {
   ServerProfile,
   profileToBridgeConfig,
 } from "./profileStore";
+import { HabitSuggestion, SkillManager } from "./skillManager";
+import { SessionStore } from "./sessionStore";
+
+export type SettingsTabId = "server" | "knowledge" | "preferences" | "wizard";
 
 /**
  * 专属可视化「设置中心」+「新机配置向导」WebviewPanel
@@ -35,6 +41,7 @@ export class SettingsPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private cachedMemories: RemoteMemoryItem[] = [];
+  private cachedHabits: HabitSuggestion[] = [];
   private cachedLocalStatus: LocalSetupStatus | undefined;
   private wizardTargetProfileId = "";
 
@@ -45,9 +52,11 @@ export class SettingsPanel {
     memory: MemoryManager;
     wizard: SetupWizardManager;
     profiles: ProfileStore;
+    skills: SkillManager;
+    sessions: SessionStore;
     logger: BridgeLogger;
     focusSection?: "server" | "memory";
-    initialTab?: "general" | "wizard";
+    initialTab?: SettingsTabId;
   }): SettingsPanel {
     if (SettingsPanel.currentPanel) {
       SettingsPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
@@ -63,7 +72,7 @@ export class SettingsPanel {
 
     const panel = vscode.window.createWebviewPanel(
       "claudeBridge.settings",
-      "ClaudeBridge · 渡桥 设置与向导",
+      "ClaudeBridge · 渡桥 设置中心",
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -83,6 +92,8 @@ export class SettingsPanel {
       params.memory,
       params.wizard,
       params.profiles,
+      params.skills,
+      params.sessions,
       params.logger
     );
 
@@ -102,6 +113,8 @@ export class SettingsPanel {
     private readonly memory: MemoryManager,
     private readonly wizard: SetupWizardManager,
     private readonly profiles: ProfileStore,
+    private readonly skills: SkillManager,
+    private readonly sessions: SessionStore,
     private readonly logger: BridgeLogger
   ) {
     this.panel = panel;
@@ -185,7 +198,7 @@ export class SettingsPanel {
     return this.profiles.saveProfile(patch, false);
   }
 
-  public syncState(focusSection?: string, activeTab?: "general" | "wizard"): void {
+  public syncState(focusSection?: string, activeTab?: SettingsTabId): void {
     const cfg = getBridgeConfig();
     const wizardTargetProfile = this.getWizardTargetProfile();
     const envProxy =
@@ -208,7 +221,10 @@ export class SettingsPanel {
         envProxy,
         logFilePath: this.logger.getLogFilePath(),
         memoryBackupDir: this.memory.getBackupDir(),
+        skillsDir: this.skills.getLocalSkillsDir(),
+        skills: this.skills.listLocalSkills(),
         memories: this.cachedMemories,
+        habits: this.cachedHabits,
         localStatus: this.cachedLocalStatus ?? null,
         desktopState: this.wizard.getDesktopState(),
         focusSection: focusSection ?? null,
@@ -776,6 +792,111 @@ export class SettingsPanel {
           "claudeBridge"
         );
         break;
+
+      case "setChatTheme": {
+        const raw = String(msg.theme ?? "claude");
+        const valid: ChatTheme[] = ["claude", "wechat", "feishu", "vscode"];
+        const theme: ChatTheme = valid.includes(raw as ChatTheme)
+          ? (raw as ChatTheme)
+          : "claude";
+        await updateChatTheme(theme);
+        this.syncState();
+        break;
+      }
+
+      case "refreshSkills":
+        this.syncState();
+        break;
+
+      case "createSkill": {
+        const name = String(msg.name ?? "");
+        const desc = String(msg.description ?? "");
+        const res = await this.skills.createSkillTemplate(name, desc);
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
+        break;
+      }
+
+      case "openSkill": {
+        const skillPath = String(msg.path ?? "");
+        await this.skills.openSkillFile(skillPath);
+        break;
+      }
+
+      case "deleteSkill": {
+        const dirName = String(msg.dirName ?? "");
+        const res = this.skills.deleteLocalSkill(dirName);
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
+        break;
+      }
+
+      case "syncSkillsNow": {
+        void this.panel.webview.postMessage({ type: "skillsBusy", busy: true });
+        const res = await this.skills.syncToRemote(getBridgeConfig(), { force: true });
+        void this.panel.webview.postMessage({ type: "skillsBusy", busy: false });
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
+        break;
+      }
+
+      case "extractHabits": {
+        void this.panel.webview.postMessage({ type: "habitsLoading", loading: true });
+        const res = await this.skills.extractHabitsFromSessions(
+          getBridgeConfig(),
+          this.sessions.listSessions()
+        );
+        if (res.ok) {
+          this.cachedHabits = res.items;
+        }
+        void this.panel.webview.postMessage({ type: "habitsLoading", loading: false });
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: res.ok,
+          message: res.message,
+        });
+        break;
+      }
+
+      case "applyHabits": {
+        const rules = Array.isArray(msg.rules)
+          ? msg.rules.map((r) => String(r))
+          : [];
+        const cfg = getBridgeConfig();
+        const writeRes = this.skills.appendRulesToLocalClaudeMd(cfg, rules);
+        let finalMsg = writeRes.message;
+        if (writeRes.ok && writeRes.added > 0 && this.bridge.getState().status === "connected") {
+          const syncRes = await this.rulesSync.sync(cfg, { force: true });
+          if (syncRes.ok) {
+            finalMsg += " 并已自动同步到远程 VPS。";
+          }
+        }
+        if (writeRes.ok) {
+          this.cachedHabits = this.cachedHabits.filter(
+            (h) => !rules.includes(h.rule)
+          );
+        }
+        this.syncState();
+        void this.panel.webview.postMessage({
+          type: "toast",
+          ok: writeRes.ok,
+          message: finalMsg,
+        });
+        break;
+      }
     }
   }
 
@@ -801,6 +922,8 @@ export class SettingsPanel {
       keepRunningOnClose: Boolean(raw.keepRunningOnClose),
       autoAttachWorkspaceContext: Boolean(raw.autoAttachWorkspaceContext),
       syncLocalRules: Boolean(raw.syncLocalRules),
+      syncLocalSkills:
+        raw.syncLocalSkills !== undefined ? Boolean(raw.syncLocalSkills) : true,
       localClaudeMdPaths: Array.isArray(raw.localClaudeMdPaths)
         ? raw.localClaudeMdPaths.map((s) => String(s).trim()).filter(Boolean)
         : ["~/.claude/CLAUDE.md"],
@@ -954,8 +1077,8 @@ export class SettingsPanel {
     <header class="page-head">
       <div class="head-brand">
         <div class="brand-logo">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2L14.4 9.2L22 12L14.4 14.8L12 22L9.6 14.8L2 12L9.6 9.2L12 2Z"/>
+          <svg width="22" height="17" viewBox="0 0 18 14" fill="currentColor" shape-rendering="crispEdges">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M2 1H16V4H18V7H16V9H15V13H13V9H12V13H10V9H8V13H6V9H5V13H3V9H2V7H0V4H2V1ZM5 4V6H7V4H5ZM11 4V6H13V4H11Z"/>
           </svg>
         </div>
         <div>
@@ -973,12 +1096,14 @@ export class SettingsPanel {
     <div id="toastBar" class="toast-bar"></div>
 
     <nav class="tab-bar">
-      <button type="button" class="tab-btn active" data-tab="general">常规设置与记忆</button>
-      <button type="button" class="tab-btn" data-tab="wizard">新机配置向导 (4 步部署)</button>
+      <button type="button" class="tab-btn active" data-tab="server">服务器与连接</button>
+      <button type="button" class="tab-btn" data-tab="knowledge">规则、记忆与 Skill</button>
+      <button type="button" class="tab-btn" data-tab="preferences">外观与对话习惯</button>
+      <button type="button" class="tab-btn" data-tab="wizard">新机配置向导</button>
     </nav>
 
-    <div id="tab-general" class="tab-pane active">
-    <!-- 卡片 1：远程服务器与隧道 -->
+    <!-- Tab 1：服务器与连接 -->
+    <div id="tab-server" class="tab-pane active">
     <section class="card" id="section-server">
       <div class="card-head">
         <div>
@@ -1045,20 +1170,55 @@ export class SettingsPanel {
       </div>
     </section>
 
-    <!-- 卡片 2：规则与记忆中心 -->
+    <details class="card advanced-card">
+      <summary class="advanced-summary">
+        <span>高级路径、端口与诊断日志</span>
+        <span class="summary-hint">通常保持默认即可</span>
+      </summary>
+      <div class="advanced-body">
+        <div class="grid-2">
+          <div class="field">
+            <label for="localPort">本地 DevSpace 端口</label>
+            <input id="localPort" type="number" min="1" max="65535" />
+          </div>
+          <div class="field">
+            <label for="remotePort">远程回环映射端口</label>
+            <input id="remotePort" type="number" min="1" max="65535" />
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="devspacePath">本地 devspace 路径（留空自动查找）</label>
+            <input id="devspacePath" type="text" placeholder="留空自动搜索 PATH 与 nvm" />
+          </div>
+          <div class="field">
+            <label for="remoteClaudePath">远程 claude 命令或路径</label>
+            <input id="remoteClaudePath" type="text" placeholder="claude" />
+          </div>
+        </div>
+        <div class="inline-actions" style="margin-top: 8px;">
+          <button id="openLogBtn" class="btn secondary small" type="button">打开诊断日志 (bridge.log)</button>
+          <button id="openRawSettingsBtn" class="btn secondary small" type="button">打开原始 VS Code 设置</button>
+        </div>
+      </div>
+    </details>
+    </div>
+
+    <!-- Tab 2：规则、记忆与 Skill 知识库 -->
+    <div id="tab-knowledge" class="tab-pane">
     <section class="card" id="section-memory">
       <div class="card-head">
         <div>
-          <h2>规则与记忆中心</h2>
-          <p class="card-desc">管理本地 CLAUDE.md 无损同步，并查看/备份远程 Claude 自动记住的编程习惯。</p>
+          <h2>个人规则 (CLAUDE.md)</h2>
+          <p class="card-desc">管理本地 CLAUDE.md 编码与沟通习惯，连接 VPS 时仅在内容变化时无损合并到远程。</p>
         </div>
       </div>
 
       <div class="sub-block">
         <div class="toggle-row">
           <div>
-            <div class="toggle-title">连接时自动同步本地 CLAUDE.md</div>
-            <div class="toggle-desc">仅在本地文件内容变化时无损合并到远程 ~/.claude/CLAUDE.md，不覆盖远程路由规则</div>
+            <div class="toggle-title">连接或切换服务器时自动同步本地 CLAUDE.md</div>
+            <div class="toggle-desc">仅在本地文件内容变化时无损同步，绝不覆盖远程路由规则，也不在聊天中途触发</div>
           </div>
           <label class="switch-wrap">
             <input id="syncLocalRules" type="checkbox" />
@@ -1072,8 +1232,77 @@ export class SettingsPanel {
           <div class="inline-actions">
             <button id="addRulePathBtn" class="btn secondary small" type="button">+ 添加规则文件</button>
             <button id="openLocalRuleBtn" class="btn secondary small" type="button">打开本地 CLAUDE.md</button>
-            <button id="syncRulesNowBtn" class="btn secondary small" type="button">立即同步到远程</button>
+            <button id="syncRulesNowBtn" class="btn primary small" type="button">立即同步规则到远程</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="section-skills">
+      <div class="card-head">
+        <div>
+          <h2>我的 Skill 库（本机维护，自动同步多台 VPS）</h2>
+          <p class="card-desc">以本机 <code>~/.claude/skills/</code> 为唯一主库；在聊天输入框敲 <code>/</code> 即可快捷调用，换新 VPS 自动带走不丢失。</p>
+        </div>
+      </div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-title">连接或切换 VPS 时自动增量同步本机 Skill</div>
+          <div class="toggle-desc">按内容指纹比对，仅同步有变动的 Skill，绝不误删远程已有的其他 Skill</div>
+        </div>
+        <label class="switch-wrap">
+          <input id="syncLocalSkills" type="checkbox" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="inline-actions">
+        <button id="syncSkillsNowBtn" class="btn primary small" type="button">立即同步 Skill 到当前 VPS</button>
+        <button id="refreshSkillsBtn" class="btn secondary small" type="button">刷新列表</button>
+      </div>
+
+      <div id="skillsList" class="memories-list"></div>
+
+      <details class="sub-expander" id="newSkillBox">
+        <summary>+ 新建本地 Skill 模板</summary>
+        <div class="sub-expander-body">
+          <div class="grid-2">
+            <div class="field">
+              <label for="newSkillName">Skill 英文标识（小写字母/数字/连字符）</label>
+              <input id="newSkillName" type="text" placeholder="例如 embedded-c-review" />
+            </div>
+            <div class="field">
+              <label for="newSkillDesc">一句话用途与触发场景</label>
+              <input id="newSkillDesc" type="text" placeholder="例如：评审嵌入式 C 模块接口与实现" />
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button id="createSkillBtn" class="btn primary small" type="button">创建并打开编辑</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="card" id="section-habits">
+      <div class="card-head">
+        <div>
+          <h2>习惯提炼与远程记忆</h2>
+          <p class="card-desc">从你近期纠正 AI 的历史发言里提炼尚未沉淀的个人偏好，勾选确认后再写入本地 CLAUDE.md。</p>
+        </div>
+      </div>
+
+      <div class="sub-block">
+        <div class="memory-head">
+          <div>
+            <div class="toggle-title">从近期对话提炼我的新习惯</div>
+            <div class="toggle-desc">只读取你发过的要求与纠正（不含代码日志），对照现有 CLAUDE.md 筛出新建议供你把关</div>
+          </div>
+          <button id="extractHabitsBtn" class="btn primary small" type="button">开始提炼新习惯</button>
+        </div>
+        <div id="habitsList" class="memories-list"></div>
+        <div id="habitsApplyRow" class="inline-actions" style="display:none;">
+          <button id="applyHabitsBtn" class="btn primary small" type="button">采纳勾选的习惯写入 CLAUDE.md</button>
         </div>
       </div>
 
@@ -1090,8 +1319,50 @@ export class SettingsPanel {
         <div id="memoriesList" class="memories-list"></div>
       </div>
     </section>
+    </div>
 
-    <!-- 卡片 3：对话与连接习惯 -->
+    <!-- Tab 3：外观与对话习惯 -->
+    <div id="tab-preferences" class="tab-pane">
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>界面主题（含聊天页、Markdown 与设置中心）</h2>
+          <p class="card-desc">点选立刻生效并同步保存，浅色 VS Code 下也会自动适配柔和浅色版本。</p>
+        </div>
+      </div>
+
+      <div class="theme-cards-grid" id="settingsThemeGrid">
+        <button type="button" class="theme-card-btn" data-settings-theme="claude">
+          <span class="theme-card-dot" style="background:#d97757"></span>
+          <div>
+            <div class="theme-card-name">Claude 风格</div>
+            <div class="theme-card-desc">暖炭黑画布 · 陶土暖橙气泡</div>
+          </div>
+        </button>
+        <button type="button" class="theme-card-btn" data-settings-theme="wechat">
+          <span class="theme-card-dot" style="background:#07c160"></span>
+          <div>
+            <div class="theme-card-name">微信风格</div>
+            <div class="theme-card-desc">经典左灰右绿聊天双气泡</div>
+          </div>
+        </button>
+        <button type="button" class="theme-card-btn" data-settings-theme="feishu">
+          <span class="theme-card-dot" style="background:#3370ff"></span>
+          <div>
+            <div class="theme-card-name">飞书风格</div>
+            <div class="theme-card-desc">飞书品牌蓝 · 云文档高亮块排版</div>
+          </div>
+        </button>
+        <button type="button" class="theme-card-btn" data-settings-theme="vscode">
+          <span class="theme-card-dot" style="background:#8e8e93"></span>
+          <div>
+            <div class="theme-card-name">跟随 VS Code</div>
+            <div class="theme-card-desc">完全贴合当前编辑器原生配色</div>
+          </div>
+        </button>
+      </div>
+    </section>
+
     <section class="card">
       <div class="card-head">
         <div>
@@ -1164,40 +1435,6 @@ export class SettingsPanel {
         </div>
       </div>
     </section>
-
-    <!-- 卡片 4：高级路径与诊断 -->
-    <details class="card advanced-card">
-      <summary class="advanced-summary">
-        <span>高级路径、端口与诊断日志</span>
-        <span class="summary-hint">通常保持默认即可</span>
-      </summary>
-      <div class="advanced-body">
-        <div class="grid-2">
-          <div class="field">
-            <label for="localPort">本地 DevSpace 端口</label>
-            <input id="localPort" type="number" min="1" max="65535" />
-          </div>
-          <div class="field">
-            <label for="remotePort">远程回环映射端口</label>
-            <input id="remotePort" type="number" min="1" max="65535" />
-          </div>
-        </div>
-        <div class="grid-2">
-          <div class="field">
-            <label for="devspacePath">本地 devspace 路径（留空自动查找）</label>
-            <input id="devspacePath" type="text" placeholder="留空自动搜索 PATH 与 nvm" />
-          </div>
-          <div class="field">
-            <label for="remoteClaudePath">远程 claude 命令或路径</label>
-            <input id="remoteClaudePath" type="text" placeholder="claude" />
-          </div>
-        </div>
-        <div class="inline-actions" style="margin-top: 8px;">
-          <button id="openLogBtn" class="btn secondary small" type="button">打开诊断日志 (bridge.log)</button>
-          <button id="openRawSettingsBtn" class="btn secondary small" type="button">打开原始 VS Code 设置</button>
-        </div>
-      </div>
-    </details>
     </div>
 
     <!-- Tab 2：新机配置向导（4 步图形化一键部署） -->

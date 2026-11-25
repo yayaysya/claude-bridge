@@ -17,6 +17,79 @@
   --font-mono: var(--vscode-editor-font-family, monospace);
 }
 
+/* 设置中心同步跟随 4 套完整视觉主题 */
+body[data-theme="claude"] {
+  --claude-orange: #d97757;
+  --claude-orange-hover: #e38667;
+  --claude-orange-soft: rgba(217, 119, 87, 0.15);
+  --claude-orange-border: rgba(217, 119, 87, 0.46);
+  --bg: #1c1a17;
+  --card: #25221e;
+  --input-bg: #2e2a25;
+  --border: rgba(242, 232, 215, 0.1);
+  --border-strong: rgba(242, 232, 215, 0.18);
+  --fg: #f0ebe2;
+  --muted: #a39b8e;
+}
+
+body.vscode-light[data-theme="claude"] {
+  --bg: #f5f2eb;
+  --card: #fdfcf9;
+  --input-bg: #f1ede4;
+  --border: rgba(45, 38, 28, 0.12);
+  --border-strong: rgba(45, 38, 28, 0.22);
+  --fg: #26231e;
+  --muted: #70695e;
+}
+
+body[data-theme="wechat"] {
+  --claude-orange: #07c160;
+  --claude-orange-hover: #14cf6d;
+  --claude-orange-soft: rgba(7, 193, 96, 0.15);
+  --claude-orange-border: rgba(7, 193, 96, 0.45);
+  --bg: #111111;
+  --card: #1d1d1d;
+  --input-bg: #262626;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --fg: #ececec;
+  --muted: #8c8c8c;
+}
+
+body.vscode-light[data-theme="wechat"] {
+  --bg: #ededed;
+  --card: #ffffff;
+  --input-bg: #f7f7f7;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --fg: #191919;
+  --muted: #737373;
+}
+
+body[data-theme="feishu"] {
+  --claude-orange: #3370ff;
+  --claude-orange-hover: #4e83fd;
+  --claude-orange-soft: rgba(51, 112, 255, 0.16);
+  --claude-orange-border: rgba(78, 131, 253, 0.5);
+  --bg: #15171c;
+  --card: #1e2129;
+  --input-bg: #262b35;
+  --border: rgba(180, 200, 255, 0.1);
+  --border-strong: rgba(180, 200, 255, 0.19);
+  --fg: #e8ecf4;
+  --muted: #8f99ad;
+}
+
+body.vscode-light[data-theme="feishu"] {
+  --bg: #f5f6f7;
+  --card: #ffffff;
+  --input-bg: #f2f3f5;
+  --border: rgba(31, 35, 41, 0.1);
+  --border-strong: rgba(31, 35, 41, 0.18);
+  --fg: #1f2329;
+  --muted: #646a73;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -824,4 +897,86 @@ input[type="password"]:focus {
 .clip-hint {
   font-size: 12px;
   color: var(--muted);
+}
+
+.skill-count-tag {
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--claude-orange-soft);
+  color: var(--claude-orange);
+  margin-left: 4px;
+}
+
+.habit-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+.habit-item input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--claude-orange);
+  flex-shrink: 0;
+}
+
+.habit-rule-text {
+  font-size: 12px;
+  color: var(--fg);
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
+.theme-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.theme-card-btn {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--input-bg);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.theme-card-btn:hover {
+  border-color: var(--claude-orange-border);
+}
+
+.theme-card-btn.active {
+  background: var(--claude-orange-soft);
+  border-color: var(--claude-orange-border);
+}
+
+.theme-card-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.theme-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.theme-card-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 2px;
 }

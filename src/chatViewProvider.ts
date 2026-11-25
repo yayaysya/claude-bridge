@@ -5,10 +5,12 @@ import * as vscode from "vscode";
 import { BridgeManager } from "./bridgeManager";
 import { ClaudeClient, ClaudeRunHandle } from "./claudeClient";
 import {
+  ChatTheme,
   EffortLevel,
   getActiveWorkspacePath,
   getBridgeConfig,
   PermissionMode,
+  updateChatTheme,
   updateEffort,
   updateModel,
   updatePermissionMode,
@@ -23,6 +25,7 @@ import {
 import { TerminalManager } from "./terminalManager";
 import { RulesSyncManager } from "./rulesSync";
 import { ProfileStore } from "./profileStore";
+import { SkillManager } from "./skillManager";
 import {
   collectGitBadgeInfo,
   collectWorkspaceSnapshot,
@@ -39,6 +42,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private view: vscode.WebviewView | undefined;
   private activeRun: ClaudeRunHandle | undefined;
+  private runningSessionId: string | undefined;
   private streamingMessageId: string | undefined;
   private consecutiveFailures = 0;
   private isHandingOff = false;
@@ -58,7 +62,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly sessions: SessionStore,
     private readonly terminal: TerminalManager,
     private readonly rulesSync: RulesSyncManager,
-    private readonly profiles: ProfileStore
+    private readonly profiles: ProfileStore,
+    private readonly skills: SkillManager
   ) {
     this.bridge.onDidChangeState(() => {
       this.syncState();
@@ -256,6 +261,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       };
     }
 
+    const openTabs = this.sessions.getOpenTabs().map((s) => ({
+      id: s.id,
+      title: s.title || "新对话",
+      isRunning: this.claude.isRunning() && this.runningSessionId === s.id,
+      hasDraft: Boolean(
+        (s.draftText && s.draftText.trim()) ||
+          (s.draftAttachments && s.draftAttachments.length > 0)
+      ),
+    }));
+
+    const localSkills = this.skills.listLocalSkills().map((sk) => ({
+      name: sk.name,
+      dirName: sk.dirName,
+      description: sk.description,
+    }));
+
+    const anyRunning = this.claude.isRunning();
+    const isCurrentTabRunning =
+      anyRunning && (!this.runningSessionId || this.runningSessionId === activeSession.id);
+
     void this.view.webview.postMessage({
       type: "state",
       payload: {
@@ -263,6 +288,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         permissionMode: cfg.permissionMode,
         model: cfg.model,
         effort: cfg.effort,
+        chatTheme: cfg.chatTheme,
         syncLocalRules: cfg.syncLocalRules,
         activeProfile,
         profiles: allProfiles.map((p) => ({
@@ -285,8 +311,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         workspacePath: getActiveWorkspacePath() ?? "",
         gitBadge: this.gitBadge ?? null,
         activeEditor,
-        isRunning: this.claude.isRunning(),
-        streamingMessageId: this.streamingMessageId ?? null,
+        isRunning: isCurrentTabRunning,
+        anyRunning,
+        runningSessionId: anyRunning ? this.runningSessionId ?? null : null,
+        streamingMessageId: isCurrentTabRunning ? this.streamingMessageId ?? null : null,
         attachments: activeSession.draftAttachments ?? [],
         activeSession: slicedActiveSession,
         totalMessageCount: totalMessages,
@@ -295,6 +323,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         continuedToSession: continuedSession
           ? { id: continuedSession.id, title: continuedSession.title }
           : null,
+        openTabs,
+        skills: localSkills,
         sessions: sessionSummaries,
       },
     });
@@ -441,11 +471,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
 
+      case "setChatTheme": {
+        const raw = String(msg.theme ?? "claude");
+        const valid: ChatTheme[] = ["claude", "wechat", "feishu", "vscode"];
+        const theme: ChatTheme = valid.includes(raw as ChatTheme)
+          ? (raw as ChatTheme)
+          : "claude";
+        await updateChatTheme(theme);
+        this.syncState();
+        break;
+      }
+
       case "newSession":
-        if (this.activeRun) {
-          this.activeRun.abort();
-          this.activeRun = undefined;
-        }
+        // 多标签模式：新建标签时不打断后台正在回复的旧标签
         this.sessions.createSession(this.profiles.getActiveProfile().id);
         this.visibleMessageCount = 20;
         this.syncState();
@@ -453,11 +491,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       case "selectSession": {
         const id = String(msg.sessionId ?? "");
-        if (this.activeRun) {
-          this.activeRun.abort();
-          this.activeRun = undefined;
-        }
+        // 切换标签不断开另一个标签正在跑的回复
         this.sessions.setActiveSession(id);
+        this.visibleMessageCount = 20;
+        this.syncState();
+        break;
+      }
+
+      case "closeTab": {
+        const id = String(msg.sessionId ?? "");
+        if (!id) {
+          return;
+        }
+        // 只关闭标签页，底层聊天记录完好保留在历史列表与搜索库里
+        this.sessions.closeTab(id, this.profiles.getActiveProfile().id);
         this.visibleMessageCount = 20;
         this.syncState();
         break;
@@ -482,10 +529,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const mid = String(msg.messageId ?? "");
         if (!sid) {
           return;
-        }
-        if (this.activeRun && this.sessions.getActiveSession().id !== sid) {
-          this.activeRun.abort();
-          this.activeRun = undefined;
         }
         const targetSession = this.sessions.setActiveSession(sid);
         if (!targetSession) {
@@ -596,6 +639,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleSendPrompt(userText: string): Promise<void> {
     if (this.claude.isRunning() || this.isHandingOff) {
+      if (this.claude.isRunning() && this.runningSessionId) {
+        const cur = this.sessions.getActiveSession();
+        if (this.runningSessionId !== cur.id) {
+          vscode.window.showInformationMessage(
+            "另一个对话标签正在回复中，等它完成或切过去停止后再发送，避免并发改坏同一文件。"
+          );
+          void this.view?.webview.postMessage({ type: "restoreDraft", text: userText });
+        }
+      }
       return;
     }
 
@@ -802,6 +854,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     };
 
+    this.runningSessionId = session.id;
     this.streamingMessageId = assistantMsg.id;
     let sawLiveFiveHourQuota = false;
     const handle = this.claude.runTurn({
@@ -841,6 +894,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await handle.promise;
     if (this.activeRun === handle) {
       this.activeRun = undefined;
+      this.runningSessionId = undefined;
     }
     if (this.streamingMessageId === assistantMsg.id) {
       this.streamingMessageId = undefined;
@@ -1059,7 +1113,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * 为冷缓存脱壳压缩提取纯文本精华（剥离所有大段代码输出、日志与思考过程，控制在 ~1.5 万字符以内）
+   * 为冷缓存脱壳压缩提取分级保真纯文本摘录：
+   * - 更早轮次（最多 12 轮）高度浓缩作为全局背景；
+   * - 最近 3 轮对话保留高保真原文（单轮给足预算），确保“做了什么 / 还差什么 / 还没定论什么”零失真。
    */
   private buildCleanTranscriptForCompression(
     session: ReturnType<SessionStore["getActiveSession"]>
@@ -1103,30 +1159,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const parts: string[] = [];
     if (session.handoff?.summary) {
-      parts.push(`[Earlier summary]\n${session.handoff.summary.slice(0, 1200)}`);
+      parts.push(`[Earlier summary]\n${session.handoff.summary.slice(0, 1500)}`);
     }
     const files = Array.from(touchedFiles).slice(-16);
     if (files.length > 0) {
       parts.push(`[Touched files]\n${files.join("\n")}`);
     }
 
-    // 取最近最多 16 轮有效问答，单轮适当控长，总长不超过 15,000 字符（远小于原 76 万 tokens）
-    const recent = cleanTurns.slice(-16);
-    const turnLines: string[] = [];
-    let budget = 14_000;
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const q = recent[i].user.slice(0, 350);
-      const a = recent[i].assistant.slice(0, 900);
-      const block = `User: ${q}\nAssistant: ${a}`;
-      if (budget - block.length < 0 && turnLines.length >= 4) {
-        break;
+    // 1. 更早轮次（倒数第 4 ~ 倒数第 15 轮）：精简保留背景脉络
+    const recent3Count = Math.min(3, cleanTurns.length);
+    const earlierTurns = cleanTurns.slice(
+      Math.max(0, cleanTurns.length - 15),
+      cleanTurns.length - recent3Count
+    );
+    if (earlierTurns.length > 0) {
+      const earlierBlocks: string[] = [];
+      let earlierBudget = 5_500;
+      for (let i = earlierTurns.length - 1; i >= 0; i--) {
+        const q = earlierTurns[i].user.slice(0, 220);
+        const a = earlierTurns[i].assistant.slice(0, 420);
+        const block = `User: ${q}\nAssistant: ${a}`;
+        if (earlierBudget - block.length < 0 && earlierBlocks.length >= 2) {
+          break;
+        }
+        earlierBlocks.unshift(block);
+        earlierBudget -= block.length;
       }
-      turnLines.unshift(block);
-      budget -= block.length;
+      if (earlierBlocks.length > 0) {
+        parts.push(`[Earlier context (condensed)]\n${earlierBlocks.join("\n\n")}`);
+      }
     }
-    if (turnLines.length > 0) {
-      parts.push(`[Recent Q&A]\n${turnLines.join("\n\n")}`);
+
+    // 2. 最近 3 轮对话：高保真保留（重点对齐用户意图、已完成改动与悬而未决的问题）
+    const latestThree = cleanTurns.slice(-recent3Count);
+    if (latestThree.length > 0) {
+      const latestBlocks = latestThree.map((turn, idx) => {
+        const q = turn.user.slice(0, 900);
+        const a = turn.assistant.slice(0, 2200);
+        return `### Recent Turn -${latestThree.length - idx}\nUser: ${q}\nAssistant: ${a}`;
+      });
+      parts.push(`[Latest 3 turns (high fidelity)]\n${latestBlocks.join("\n\n")}`);
     }
+
+    // 若最后一条用户发言尚未收到成功回复，也保留为“用户最新刚提的诉求”
+    if (pendingUser) {
+      parts.push(`[Latest pending user request]\nUser: ${pendingUser.slice(0, 600)}`);
+    }
+
     return parts.join("\n\n");
   }
 
@@ -1329,8 +1408,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <div class="header-left">
         <button id="sessionTrigger" class="session-trigger" title="切换历史会话">
           <span class="brand-mark">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L14.4 9.2L22 12L14.4 14.8L12 22L9.6 14.8L2 12L9.6 9.2L12 2Z"/>
+            <svg width="16" height="13" viewBox="0 0 18 14" fill="currentColor" shape-rendering="crispEdges">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M2 1H16V4H18V7H16V9H15V13H13V9H12V13H10V9H8V13H6V9H5V13H3V9H2V7H0V4H2V1ZM5 4V6H7V4H5ZM11 4V6H13V4H11Z"/>
             </svg>
           </span>
           <span id="sessionTitleText" class="session-name">新对话</span>
@@ -1375,6 +1454,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
     </header>
 
+    <div id="tabStrip" class="tab-strip" style="display:none;"></div>
+
     <div id="historyPopover" class="popover history-popover">
       <div class="history-search-wrap">
         <svg class="history-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
@@ -1394,6 +1475,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     <div id="permPopover" class="popover menu-popover"></div>
     <div id="modelPopover" class="popover menu-popover model-popover"></div>
+    <div id="slashPopover" class="popover slash-popover"></div>
 
     <footer class="composer-outer">
       <div id="cacheAlertBar" class="cache-alert-bar" style="display:none;"></div>

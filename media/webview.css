@@ -3,6 +3,10 @@
   --claude-orange-hover: #e08465;
   --claude-orange-soft: rgba(217, 119, 87, 0.14);
   --claude-orange-border: rgba(217, 119, 87, 0.42);
+  --user-bubble-bg: rgba(217, 119, 87, 0.22);
+  --user-bubble-border: rgba(217, 119, 87, 0.52);
+  --user-bubble-fg: var(--fg);
+  --user-bubble-time: var(--muted);
   --bg: var(--vscode-sideBar-background, #181818);
   --surface: var(--vscode-editor-background, #1f1f1f);
   --surface-2: var(--vscode-editorWidget-background, #242424);
@@ -12,6 +16,21 @@
   --fg: var(--vscode-foreground, #e5e5e5);
   --muted: var(--vscode-descriptionForeground, #8e8e93);
   --link: var(--vscode-textLink-foreground, #6cb6ff);
+  --md-heading: var(--fg);
+  --md-code-bg: rgba(128, 128, 128, 0.16);
+  --md-code-fg: var(--fg);
+  --md-code-border: transparent;
+  --md-codeblock-bg: var(--surface);
+  --md-codeblock-head: rgba(128, 128, 128, 0.06);
+  --md-quote-bg: transparent;
+  --md-quote-border: var(--claude-orange-border);
+  --md-quote-fg: var(--muted);
+  --md-table-head: rgba(128, 128, 128, 0.09);
+  --md-table-zebra: transparent;
+  --md-table-hover: rgba(128, 128, 128, 0.05);
+  --md-ref-bg: rgba(108, 182, 255, 0.08);
+  --md-ref-border: rgba(108, 182, 255, 0.26);
+  --md-ref-hover: rgba(108, 182, 255, 0.18);
   --success: #3fb950;
   --warn: #d29922;
   --danger: #f14c4c;
@@ -19,6 +38,227 @@
   --blue: #58a6ff;
   --font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   --font-mono: var(--vscode-editor-font-family, "JetBrains Mono", Consolas, monospace);
+}
+
+/* ========== 主题 1：Claude 风格（温润暖炭黑 / 浅色自动切暖纸风） ========== */
+body[data-theme="claude"] {
+  --claude-orange: #d97757;
+  --claude-orange-hover: #e38667;
+  --claude-orange-soft: rgba(217, 119, 87, 0.15);
+  --claude-orange-border: rgba(217, 119, 87, 0.46);
+  --user-bubble-bg: #35271f;
+  --user-bubble-border: rgba(217, 119, 87, 0.5);
+  --user-bubble-fg: #f7f2ea;
+  --user-bubble-time: #c2a996;
+  --bg: #1c1a17;
+  --surface: #24211d;
+  --surface-2: #2d2924;
+  --surface-hover: rgba(242, 232, 215, 0.07);
+  --border: rgba(242, 232, 215, 0.09);
+  --border-strong: rgba(242, 232, 215, 0.18);
+  --fg: #f0ebe2;
+  --muted: #a39b8e;
+  --link: #e59978;
+  --md-heading: #faf6ef;
+  --md-code-bg: rgba(217, 119, 87, 0.14);
+  --md-code-fg: #f2c6a2;
+  --md-code-border: rgba(217, 119, 87, 0.22);
+  --md-codeblock-bg: #151310;
+  --md-codeblock-head: #221f1b;
+  --md-quote-bg: rgba(217, 119, 87, 0.07);
+  --md-quote-border: #d97757;
+  --md-quote-fg: #c9bfb0;
+  --md-table-head: #2a2621;
+  --md-table-zebra: rgba(242, 232, 215, 0.025);
+  --md-table-hover: rgba(217, 119, 87, 0.06);
+  --md-ref-bg: rgba(217, 119, 87, 0.12);
+  --md-ref-border: rgba(217, 119, 87, 0.34);
+  --md-ref-hover: rgba(217, 119, 87, 0.24);
+}
+
+body.vscode-light[data-theme="claude"] {
+  --user-bubble-bg: #f3e4da;
+  --user-bubble-border: rgba(201, 100, 66, 0.45);
+  --user-bubble-fg: #2b211b;
+  --user-bubble-time: #8a6d5c;
+  --bg: #f5f2eb;
+  --surface: #fdfcf9;
+  --surface-2: #efeae0;
+  --surface-hover: rgba(45, 38, 28, 0.06);
+  --border: rgba(45, 38, 28, 0.11);
+  --border-strong: rgba(45, 38, 28, 0.2);
+  --fg: #26231e;
+  --muted: #70695e;
+  --link: #c45d3b;
+  --md-heading: #1c1915;
+  --md-code-bg: rgba(196, 93, 59, 0.1);
+  --md-code-fg: #a64628;
+  --md-code-border: rgba(196, 93, 59, 0.2);
+  --md-codeblock-bg: #faf8f4;
+  --md-codeblock-head: #f0ece3;
+  --md-quote-bg: rgba(217, 119, 87, 0.08);
+  --md-quote-fg: #595248;
+  --md-table-head: #ede8de;
+  --md-table-zebra: rgba(45, 38, 28, 0.025);
+}
+
+/* ========== 主题 2：微信风格（左灰右绿经典聊天双气泡） ========== */
+body[data-theme="wechat"] {
+  --claude-orange: #07c160;
+  --claude-orange-hover: #14cf6d;
+  --claude-orange-soft: rgba(7, 193, 96, 0.15);
+  --claude-orange-border: rgba(7, 193, 96, 0.45);
+  --user-bubble-bg: #267c4d;
+  --user-bubble-border: rgba(7, 193, 96, 0.45);
+  --user-bubble-fg: #ffffff;
+  --user-bubble-time: rgba(255, 255, 255, 0.72);
+  --bg: #111111;
+  --surface: #1c1c1c;
+  --surface-2: #262626;
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --fg: #ececec;
+  --muted: #8c8c8c;
+  --link: #57d68d;
+  --md-heading: #ffffff;
+  --md-code-bg: rgba(7, 193, 96, 0.13);
+  --md-code-fg: #8ce8b3;
+  --md-code-border: rgba(7, 193, 96, 0.22);
+  --md-codeblock-bg: #151515;
+  --md-codeblock-head: #1e1e1e;
+  --md-quote-bg: rgba(255, 255, 255, 0.035);
+  --md-quote-border: #07c160;
+  --md-quote-fg: #b8b8b8;
+  --md-table-head: #2a2a2a;
+  --md-table-zebra: rgba(255, 255, 255, 0.02);
+  --md-table-hover: rgba(7, 193, 96, 0.06);
+  --md-ref-bg: rgba(7, 193, 96, 0.12);
+  --md-ref-border: rgba(7, 193, 96, 0.34);
+  --md-ref-hover: rgba(7, 193, 96, 0.22);
+}
+
+body[data-theme="wechat"] .msg-assistant {
+  background: #202020;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px 14px 14px 14px;
+  padding: 11px 13px 9px;
+}
+
+body.vscode-light[data-theme="wechat"] {
+  --user-bubble-bg: #95ec69;
+  --user-bubble-border: #7fd656;
+  --user-bubble-fg: #111111;
+  --user-bubble-time: rgba(0, 0, 0, 0.5);
+  --bg: #ededed;
+  --surface: #f7f7f7;
+  --surface-2: #ffffff;
+  --surface-hover: rgba(0, 0, 0, 0.05);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --fg: #191919;
+  --muted: #737373;
+  --link: #069c4e;
+  --md-heading: #111111;
+  --md-code-bg: rgba(7, 193, 96, 0.1);
+  --md-code-fg: #057a3c;
+  --md-codeblock-bg: #f6f6f6;
+  --md-codeblock-head: #ececec;
+  --md-quote-bg: #f5f5f5;
+  --md-quote-fg: #595959;
+  --md-table-head: #f0f0f0;
+}
+
+body.vscode-light[data-theme="wechat"] .msg-assistant {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.07);
+}
+
+/* ========== 主题 3：飞书风格（飞书蓝 + 云文档 Callout/表格排版） ========== */
+body[data-theme="feishu"] {
+  --claude-orange: #3370ff;
+  --claude-orange-hover: #4e83fd;
+  --claude-orange-soft: rgba(51, 112, 255, 0.16);
+  --claude-orange-border: rgba(78, 131, 253, 0.5);
+  --user-bubble-bg: #1e3766;
+  --user-bubble-border: rgba(78, 131, 253, 0.55);
+  --user-bubble-fg: #f0f5ff;
+  --user-bubble-time: #9bb8f0;
+  --bg: #15171c;
+  --surface: #1d2027;
+  --surface-2: #252933;
+  --surface-hover: rgba(180, 200, 255, 0.07);
+  --border: rgba(180, 200, 255, 0.1);
+  --border-strong: rgba(180, 200, 255, 0.19);
+  --fg: #e8ecf4;
+  --muted: #8f99ad;
+  --link: #6ea0ff;
+  --md-heading: #f5f8ff;
+  --md-code-bg: rgba(78, 131, 253, 0.16);
+  --md-code-fg: #9cc0ff;
+  --md-code-border: rgba(78, 131, 253, 0.25);
+  --md-codeblock-bg: #101319;
+  --md-codeblock-head: #1b202b;
+  --md-quote-bg: rgba(51, 112, 255, 0.1);
+  --md-quote-border: #3370ff;
+  --md-quote-fg: #cfd9ec;
+  --md-table-head: rgba(51, 112, 255, 0.13);
+  --md-table-zebra: rgba(180, 200, 255, 0.025);
+  --md-table-hover: rgba(51, 112, 255, 0.08);
+  --md-ref-bg: rgba(51, 112, 255, 0.15);
+  --md-ref-border: rgba(78, 131, 253, 0.42);
+  --md-ref-hover: rgba(51, 112, 255, 0.26);
+}
+
+body[data-theme="feishu"] .md h1,
+body[data-theme="feishu"] .md h2 {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+body[data-theme="feishu"] .md blockquote {
+  padding: 8px 12px;
+  border: 1px solid rgba(78, 131, 253, 0.26);
+  border-left: 3px solid var(--md-quote-border);
+  border-radius: 8px;
+}
+
+body.vscode-light[data-theme="feishu"] {
+  --user-bubble-bg: #e1eaff;
+  --user-bubble-border: #adc6ff;
+  --user-bubble-fg: #1f2329;
+  --user-bubble-time: #4e6699;
+  --bg: #f5f6f7;
+  --surface: #ffffff;
+  --surface-2: #f2f3f5;
+  --surface-hover: rgba(31, 35, 41, 0.05);
+  --border: rgba(31, 35, 41, 0.1);
+  --border-strong: rgba(31, 35, 41, 0.18);
+  --fg: #1f2329;
+  --muted: #646a73;
+  --link: #245bdb;
+  --md-heading: #1f2329;
+  --md-code-bg: #eef2ff;
+  --md-code-fg: #245bdb;
+  --md-code-border: #d6e2ff;
+  --md-codeblock-bg: #f7f8fa;
+  --md-codeblock-head: #eff1f5;
+  --md-quote-bg: #f0f4ff;
+  --md-quote-fg: #374151;
+  --md-table-head: #eff3fa;
+  --md-table-zebra: rgba(31, 35, 41, 0.02);
+}
+
+/* ========== 主题 4：跟随 VS Code（完全融合当前编辑器主题） ========== */
+body[data-theme="vscode"] {
+  --claude-orange: var(--vscode-textLink-foreground, #4c9aff);
+  --claude-orange-hover: var(--vscode-textLink-activeForeground, #6cb6ff);
+  --claude-orange-soft: rgba(128, 128, 128, 0.16);
+  --claude-orange-border: var(--vscode-focusBorder, rgba(128, 128, 128, 0.45));
+  --user-bubble-bg: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.2));
+  --user-bubble-border: var(--vscode-focusBorder, rgba(128, 128, 128, 0.45));
+  --user-bubble-fg: var(--vscode-foreground, #e5e5e5);
+  --user-bubble-time: var(--vscode-descriptionForeground, #8e8e93);
 }
 
 * {
@@ -322,6 +562,56 @@ body {
   line-height: 1.35;
 }
 
+/* 齿轮菜单内一键切换对话主题 */
+.theme-picker-block {
+  padding: 5px 8px 6px;
+}
+
+.theme-picker-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.theme-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.theme-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.theme-chip:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.theme-chip.active {
+  background: var(--claude-orange-soft);
+  border-color: var(--claude-orange-border);
+  color: var(--claude-orange);
+  font-weight: 600;
+}
+
+.theme-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .switch {
   width: 30px;
   height: 17px;
@@ -397,6 +687,166 @@ body {
 .icon-btn:hover {
   background: var(--surface-hover);
   color: var(--fg);
+}
+
+/* ===== 第二行极薄多标签对话栏（>= 2 个标签时自动出现） ===== */
+.tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.chat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 148px;
+  min-width: 64px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.chat-tab:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.chat-tab.active {
+  background: var(--claude-orange-soft);
+  border-color: var(--claude-orange-border);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.chat-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tab-run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--claude-orange);
+  animation: pulse 1s infinite;
+  flex-shrink: 0;
+}
+
+.chat-tab-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0.7;
+}
+
+.chat-tab-close:hover {
+  background: rgba(128, 128, 128, 0.25);
+  color: var(--fg);
+  opacity: 1;
+}
+
+.chat-tab-add {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.chat-tab-add:hover {
+  color: var(--fg);
+  border-color: var(--claude-orange-border);
+  background: var(--surface-hover);
+}
+
+/* 输入框上方 `/` Skill 快捷选择弹层 */
+.slash-popover {
+  left: 12px;
+  right: 12px;
+  bottom: 108px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 5px;
+}
+
+.slash-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.slash-item:hover,
+.slash-item.active {
+  background: var(--claude-orange-soft);
+}
+
+.slash-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.slash-item-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--claude-orange);
+}
+
+.slash-item-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--muted);
+}
+
+.slash-item-desc {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ===== 历史会话下拉弹层 ===== */
@@ -766,10 +1216,10 @@ body {
 }
 
 .handoff-card-body {
-  padding: 9px 11px;
+  padding: 10px 12px;
   font-size: 12px;
   border-top: 1px solid var(--border);
-  max-height: 220px;
+  max-height: 300px;
   overflow-y: auto;
 }
 
@@ -961,15 +1411,20 @@ body {
   display: inline-flex;
 }
 
-/* 用户消息（Claude Code 风格全宽柔和卡片） */
+/* 用户消息（微信/ChatGPT 风格右对齐醒目彩色气泡，随主题切换） */
 .msg-user-card {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
+  align-self: flex-end;
+  max-width: 86%;
+  min-width: 72px;
+  background: var(--user-bubble-bg);
+  border: 1px solid var(--user-bubble-border);
+  border-radius: 14px 14px 4px 14px;
+  padding: 9px 13px 7px;
+  margin-top: 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
 }
 
 .msg-user-text {
@@ -977,6 +1432,15 @@ body {
   word-break: break-word;
   line-height: 1.55;
   font-size: 13px;
+  color: var(--user-bubble-fg);
+}
+
+.msg-user-time {
+  align-self: flex-end;
+  font-size: 10px;
+  color: var(--user-bubble-time);
+  opacity: 0.85;
+  margin-top: -1px;
 }
 
 .att-row {
@@ -1191,6 +1655,7 @@ details.tool-row summary:hover {
   margin: 12px 0 6px;
   font-weight: 600;
   line-height: 1.35;
+  color: var(--md-heading);
 }
 
 .md h1 { font-size: 15px; }
@@ -1209,9 +1674,11 @@ details.tool-row summary:hover {
 
 .md blockquote {
   margin: 8px 0;
-  padding: 2px 10px;
-  border-left: 2px solid var(--claude-orange-border);
-  color: var(--muted);
+  padding: 5px 11px;
+  border-left: 3px solid var(--md-quote-border);
+  border-radius: 0 6px 6px 0;
+  background: var(--md-quote-bg);
+  color: var(--md-quote-fg);
 }
 
 .md hr {
@@ -1248,9 +1715,10 @@ details.tool-row summary:hover {
   text-align: left;
   font-weight: 600;
   padding: 7px 10px;
-  background: rgba(128, 128, 128, 0.09);
+  background: var(--md-table-head);
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
+  color: var(--md-heading);
 }
 
 .md tbody td {
@@ -1259,33 +1727,39 @@ details.tool-row summary:hover {
   vertical-align: top;
 }
 
+.md tbody tr:nth-child(even) td {
+  background: var(--md-table-zebra);
+}
+
 .md tbody tr:last-child td {
   border-bottom: none;
 }
 
 .md tbody tr:hover td {
-  background: rgba(128, 128, 128, 0.05);
+  background: var(--md-table-hover);
 }
 
 .md code {
   font-family: var(--font-mono);
   font-size: 12px;
-  background: rgba(128, 128, 128, 0.16);
-  padding: 1.5px 5px;
+  background: var(--md-code-bg);
+  color: var(--md-code-fg);
+  border: 1px solid var(--md-code-border);
+  padding: 1px 5px;
   border-radius: 4px;
 }
 
 .md code.code-ref {
   cursor: pointer;
   color: var(--link);
-  border: 1px solid rgba(108, 182, 255, 0.24);
-  background: rgba(108, 182, 255, 0.08);
+  border: 1px solid var(--md-ref-border);
+  background: var(--md-ref-bg);
   transition: background 0.12s, border-color 0.12s;
 }
 
 .md code.code-ref:hover {
-  background: rgba(108, 182, 255, 0.18);
-  border-color: rgba(108, 182, 255, 0.5);
+  background: var(--md-ref-hover);
+  border-color: var(--claude-orange-border);
   text-decoration: underline;
 }
 
@@ -1294,7 +1768,7 @@ details.tool-row summary:hover {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  background: var(--surface);
+  background: var(--md-codeblock-bg);
 }
 
 .code-head {
@@ -1304,7 +1778,7 @@ details.tool-row summary:hover {
   padding: 5px 10px;
   font-size: 11px;
   color: var(--muted);
-  background: rgba(128, 128, 128, 0.06);
+  background: var(--md-codeblock-head);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1334,6 +1808,8 @@ details.tool-row summary:hover {
 
 .code-block pre code {
   background: transparent;
+  border: none;
+  color: inherit;
   padding: 0;
 }
 
@@ -1349,12 +1825,13 @@ details.tool-row summary:hover {
 .streaming-star {
   color: var(--claude-orange);
   display: inline-flex;
-  animation: spin 2.2s linear infinite;
+  animation: botHop 0.9s ease-in-out infinite;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+@keyframes botHop {
+  0%, 100% { transform: translateY(0) scale(1); }
+  45% { transform: translateY(-2.5px) scale(1.04); }
+  65% { transform: translateY(0.5px) scale(0.97); }
 }
 
 .msg-footer {
