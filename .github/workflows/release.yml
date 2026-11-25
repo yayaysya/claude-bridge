@@ -39,7 +39,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Package VSIX
-        run: npx @vscode/vsce package --no-dependencies -o "claude-bridge-${{ steps.pkg.outputs.version }}.vsix"
+        run: npx @vscode/vsce package --no-dependencies -o "duduniao-${{ steps.pkg.outputs.version }}.vsix"
 
       - name: Publish to Visual Studio Marketplace
         env:
@@ -49,11 +49,11 @@ jobs:
             echo "VSCE_PAT secret is not set; skipping Marketplace publish."
             exit 1
           fi
-          npx @vscode/vsce publish --no-dependencies --packagePath "claude-bridge-${{ steps.pkg.outputs.version }}.vsix" -p "$VSCE_PAT"
+          npx @vscode/vsce publish --no-dependencies --packagePath "duduniao-${{ steps.pkg.outputs.version }}.vsix" -p "$VSCE_PAT"
 
       - name: Upload VSIX to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: claude-bridge-*.vsix
+          files: duduniao-*.vsix
           generate_release_notes: true
