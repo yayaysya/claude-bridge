@@ -1,9 +1,34 @@
 {
   "name": "claude-bridge",
   "displayName": "ClaudeBridge · 渡桥",
-  "description": "ClaudeBridge（渡桥）：通过本地 DevSpace MCP 与 SSH 反向隧道连接远程服务器上的 Claude Code，代码留在本地、AI 流量留在远程，提供侧边栏 Agent 面板、可视化设置中心与规则记忆管理。",
+  "description": "第三方开源桥接工具（渡桥）：通过本地 DevSpace MCP 与 SSH 反向隧道连接远程 Linux VPS 上的 Claude Code 与 Google Antigravity (agy)，代码留在本地、AI 流量留在远程，提供多标签侧边栏、多主题、可视化设置中心与 4 步新机配置向导。",
   "version": "0.6.0",
-  "publisher": "local-dev",
+  "publisher": "songshouli123",
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yayaysya/claude-bridge.git"
+  },
+  "homepage": "https://github.com/yayaysya/claude-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/yayaysya/claude-bridge/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "antigravity",
+    "agy",
+    "mcp",
+    "devspace",
+    "ssh",
+    "remote",
+    "ai"
+  ],
+  "galleryBanner": {
+    "color": "#1c1b19",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

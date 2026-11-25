@@ -1,0 +1,59 @@
+name: Build & Publish VS Code Extension
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck & build
+        run: |
+          npm run typecheck
+          npm run build
+          node --check dist/webview.js
+          node --check dist/settings.js
+
+      - name: Read package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package VSIX
+        run: npx @vscode/vsce package --no-dependencies -o "claude-bridge-${{ steps.pkg.outputs.version }}.vsix"
+
+      - name: Publish to Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT secret is not set; skipping Marketplace publish."
+            exit 1
+          fi
+          npx @vscode/vsce publish --no-dependencies --packagePath "claude-bridge-${{ steps.pkg.outputs.version }}.vsix" -p "$VSCE_PAT"
+
+      - name: Upload VSIX to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: claude-bridge-*.vsix
+          generate_release_notes: true
