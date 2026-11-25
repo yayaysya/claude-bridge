@@ -7,10 +7,12 @@
  *   npm run release -- 0.7.0   # 指定版本号并推送发版
  *   npm run release -- same    # 保持当前 package.json 版本号直接打 tag 并推送发版（适合首次发布）
  */
-const fs = require("fs");
-const path = require("path");
-const { execSync } = require("child_process");
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const pkgPath = path.join(rootDir, "package.json");
 
