@@ -761,8 +761,15 @@ import { Marked, Renderer } from "marked";
         );
       };
 
-      bodyHtml += renderBar("5 小时滚动额度", q.fiveHour);
-      bodyHtml += renderBar("7 天周期额度", q.sevenDay);
+      if (Array.isArray(q.secondaryPools) && q.secondaryPools.length > 0) {
+        for (const pool of q.secondaryPools) {
+          bodyHtml += renderBar(pool.label + " · 5 小时额度", pool.fiveHour);
+          bodyHtml += renderBar(pool.label + " · 7 天额度", pool.sevenDay);
+        }
+      } else {
+        bodyHtml += renderBar("5 小时滚动额度", q.fiveHour);
+        bodyHtml += renderBar("7 天周期额度", q.sevenDay);
+      }
 
       if (q.lastContextTokens && q.lastContextWindow) {
         const ctxPct = Math.min(
@@ -779,9 +786,11 @@ import { Marked, Renderer } from "marked";
       }
     }
 
+    const quotaHeadTitle =
+      state.engine === "antigravity" ? "Antigravity 实时额度" : "Claude 实时额度";
     quotaPopover.innerHTML =
       '<div class="quota-head">' +
-      '<span class="quota-head-title">Claude 实时额度</span>' +
+      '<span class="quota-head-title">' + quotaHeadTitle + "</span>" +
       '<span class="quota-head-right">' +
       '<span class="quota-head-time">' + escapeHtml(updatedLabel) + "</span>" +
       '<button class="quota-refresh-btn ' + (state.isRefreshingQuota ? "spinning" : "") + '" id="quotaRefreshBtn" title="后台静默刷新额度 (0 Token)">' + ICON_REFRESH + "</button>" +
@@ -885,9 +894,11 @@ import { Marked, Renderer } from "marked";
     const listHtml = profiles
       .map((p) => {
         const selected = p.id === activeId;
+        const engTag = p.engine === "antigravity" ? "AGY" : "Claude";
+        const portTag = p.remotePort && Number(p.remotePort) !== 7676 ? ":" + p.remotePort : "";
         const quotaBadge =
           typeof p.quota5h === "number" ? " · 5h " + p.quota5h + "%" : "";
-        const desc = (p.sshHost || "未配置 IP") + quotaBadge;
+        const desc = engTag + " · " + (p.sshHost || "未配置 IP") + portTag + quotaBadge;
         return (
           '<div class="menu-option ' + (selected ? "selected" : "") + '" data-switch-profile="' + escapeHtml(p.id) + '">' +
           '<div class="menu-opt-text">' +
@@ -1241,14 +1252,18 @@ import { Marked, Renderer } from "marked";
       });
     });
 
-    // 3. 模型 + 思考强度合并弹出菜单
+    // 3. 模型 + 思考强度合并弹出菜单（随当前服务器的引擎动态切换模型列表）
+    const activeModelList =
+      Array.isArray(state.modelOptions) && state.modelOptions.length > 0
+        ? state.modelOptions
+        : MODEL_OPTIONS;
     const currentModel = state.model || "";
     const currentEffort = state.effort || "";
-    const hasPresetModel = MODEL_OPTIONS.some((o) => o.value === currentModel);
+    const hasPresetModel = activeModelList.some((o) => o.value === currentModel);
     const displayModelOptions = hasPresetModel
-      ? MODEL_OPTIONS
+      ? activeModelList
       : [
-          ...MODEL_OPTIONS,
+          ...activeModelList,
           {
             value: currentModel,
             short: currentModel,
@@ -1394,11 +1409,22 @@ import { Marked, Renderer } from "marked";
     permBtn.className = "pill-btn " + activePerm.cls;
     permBtnLabel.textContent = activePerm.short;
 
+    const activeModelList =
+      Array.isArray(state.modelOptions) && state.modelOptions.length > 0
+        ? state.modelOptions
+        : MODEL_OPTIONS;
     const activeModel =
-      MODEL_OPTIONS.find((m) => m.value === (state.model || "")) ||
-      (state.model ? { short: state.model } : MODEL_OPTIONS[0]);
+      activeModelList.find((m) => m.value === (state.model || "")) ||
+      (state.model ? { short: state.model } : activeModelList[0]);
     const effortSuffix = state.effort ? " · " + state.effort : "";
     modelBtnLabel.textContent = activeModel.short + effortSuffix;
+
+    if (promptInput) {
+      promptInput.placeholder =
+        state.engine === "antigravity"
+          ? "Ask Antigravity anything... (Enter 发送，Shift+Enter 换行，输入 / 调 Skill)"
+          : "Ask Claude anything... (Enter 发送，Shift+Enter 换行，输入 / 调 Skill)";
+    }
 
     updateSendVisual();
     renderPopovers(state);

@@ -9,6 +9,8 @@ import {
   EffortLevel,
   getActiveWorkspacePath,
   getBridgeConfig,
+  getEngineDisplayName,
+  normalizeEngineType,
   PermissionMode,
   updateChatTheme,
   updateEffort,
@@ -281,10 +283,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const isCurrentTabRunning =
       anyRunning && (!this.runningSessionId || this.runningSessionId === activeSession.id);
 
+    const activeEngine = normalizeEngineType(cfg.engine);
     void this.view.webview.postMessage({
       type: "state",
       payload: {
         bridge: this.bridge.getState(),
+        engine: activeEngine,
+        engineLabel: getEngineDisplayName(activeEngine),
+        modelOptions: this.claude.getPresetModels(activeEngine),
         permissionMode: cfg.permissionMode,
         model: cfg.model,
         effort: cfg.effort,
@@ -294,6 +300,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         profiles: allProfiles.map((p) => ({
           id: p.id,
           name: p.name,
+          engine: normalizeEngineType(p.engine),
+          remotePort: p.remotePort || 7676,
           sshHost: p.sshHost,
           quota5h: allQuotas[p.id]?.fiveHour
             ? Math.round(allQuotas[p.id].fiveHour!.utilization * 100)
@@ -460,6 +468,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "setModel": {
         const model = String(msg.model ?? "");
         await updateModel(model);
+        await this.profiles.saveProfile({
+          id: this.profiles.getActiveProfile().id,
+          model,
+        });
         this.syncState();
         break;
       }

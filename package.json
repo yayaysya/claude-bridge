@@ -158,10 +158,23 @@
           "default": "",
           "description": "本地 devspace 可执行文件路径（留空则自动从 PATH 与 nvm 查找）"
         },
+        "claudeBridge.engine": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "antigravity"
+          ],
+          "enumDescriptions": [
+            "Claude Code CLI（远程运行 claude）",
+            "Google Antigravity CLI（远程运行 agy）"
+          ],
+          "default": "claude",
+          "description": "远程服务器运行的 AI CLI 后端引擎"
+        },
         "claudeBridge.remoteClaudePath": {
           "type": "string",
           "default": "claude",
-          "description": "远程服务器上 claude CLI 命令或绝对路径"
+          "description": "远程服务器上 CLI 命令或绝对路径（Claude 默认 claude，Antigravity 默认 agy）"
         },
         "claudeBridge.permissionMode": {
           "type": "string",

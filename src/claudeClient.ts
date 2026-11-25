@@ -1,9 +1,12 @@
 import { ChildProcess, spawn } from "child_process";
 import * as vscode from "vscode";
 import {
+  AgentEngineType,
   BridgeConfig,
   buildBaseSshArgs,
   getActiveWorkspacePath,
+  normalizeEngineType,
+  resolveRemoteCliPath,
   shellQuote,
 } from "./config";
 import {
@@ -13,19 +16,31 @@ import {
   RateLimitWindow,
   ToolCallRecord,
 } from "./sessionStore";
+import { AntigravityEngine } from "./engines/antigravityEngine";
+import {
+  AgentRunCallbacks,
+  AgentRunHandle,
+  EngineModelOption,
+  HandoffSummaryOptions,
+  HandoffSummaryResult,
+  IAgentEngine,
+  SHARED_HANDOFF_STRUCTURE_SPEC,
+} from "./engines/types";
 
 /** 远程对话执行回调 */
-export interface ClaudeRunCallbacks {
-  onUpdate: () => void;
-  onSessionId: (claudeSessionId: string) => void;
-  onQuota?: (partial: Partial<QuotaSnapshot>) => void;
-}
+export type ClaudeRunCallbacks = AgentRunCallbacks;
 
 /** 单次远程对话句柄，支持随时取消 */
-export interface ClaudeRunHandle {
-  promise: Promise<void>;
-  abort: () => void;
-}
+export type ClaudeRunHandle = AgentRunHandle;
+
+/** Claude Code 常用模型预选项 */
+export const CLAUDE_PRESET_MODELS: EngineModelOption[] = [
+  { value: "", short: "Default", title: "Default", desc: "跟随远程 EC2 默认配置" },
+  { value: "claude-opus-5-5", short: "claude-opus-5-5", title: "claude-opus-5-5", desc: "最强推理与复杂架构分析" },
+  { value: "claude-fable-5-2[1m]", short: "claude-fable-5-2[1m]", title: "claude-fable-5-2[1m]", desc: "Fable 5.2 · 1M 超长上下文" },
+  { value: "claude-sonnet-5-5", short: "claude-sonnet-5-5", title: "claude-sonnet-5-5", desc: "日常开发速度与质量均衡" },
+  { value: "claude-haiku-5-5", short: "claude-haiku-5-5", title: "claude-haiku-5-5", desc: "极速轻量问答" },
+];
 
 const TOOL_LABEL_MAP: Record<string, string> = {
   mcp__devspace__open_workspace: "DevSpace · 打开工作区",
@@ -44,20 +59,24 @@ const TOOL_LABEL_MAP: Record<string, string> = {
 };
 
 /**
- * 远程 Claude Code 流式客户端
- * 通过 SSH 将 Prompt 经由 stdin 传给 EC2 上的 `claude -p --output-format stream-json`，
- * 实时解析流式文本、思考过程与工具调用状态。
+ * 远程多引擎流式客户端路由器
+ * 统一封装 Claude Code (`claude`) 与 Google Antigravity (`agy`)，
+ * 后续扩展 Codex 时只需实现 IAgentEngine 并在此注册即可。
  */
 export class ClaudeClient {
   private activeChild: ChildProcess | undefined;
+  private readonly antigravityEngine: AntigravityEngine;
 
-  constructor(private readonly output: { appendLine(value: string): void }) {}
+  constructor(private readonly output: { appendLine(value: string): void }) {
+    this.antigravityEngine = new AntigravityEngine(output);
+  }
 
   public isRunning(): boolean {
-    return Boolean(this.activeChild);
+    return Boolean(this.activeChild) || this.antigravityEngine.isRunning();
   }
 
   public abort(): void {
+    this.antigravityEngine.abort();
     if (this.activeChild) {
       try {
         this.activeChild.kill("SIGTERM");
@@ -68,17 +87,28 @@ export class ClaudeClient {
     }
   }
 
+  /** 获取指定引擎的模型预选项列表 */
+  public getPresetModels(engine: AgentEngineType): EngineModelOption[] {
+    if (normalizeEngineType(engine) === "antigravity") {
+      return this.antigravityEngine.getPresetModels();
+    }
+    return CLAUDE_PRESET_MODELS;
+  }
+
   /**
    * 后台静默调用远程官方 `/usage` 命令获取实时额度（0 Token，不弹终端）
    */
   public async fetchQuota(
     cfg: BridgeConfig
   ): Promise<Partial<QuotaSnapshot> | undefined> {
+    if (normalizeEngineType(cfg.engine) === "antigravity") {
+      return this.antigravityEngine.fetchQuota(cfg);
+    }
     if (!cfg.sshHost || !cfg.sshUser || !cfg.sshKeyPath) {
       return undefined;
     }
 
-    const claudeBin = shellQuote(cfg.remoteClaudePath || "claude");
+    const claudeBin = shellQuote(resolveRemoteCliPath(cfg));
     const remoteCmd = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; exec ${claudeBin} -p --output-format stream-json --verbose --no-session-persistence`;
     const sshArgs = [
       ...buildBaseSshArgs(cfg, { batchMode: true }),
@@ -143,10 +173,11 @@ export class ClaudeClient {
    */
   public async generateHandoffSummary(
     cfg: BridgeConfig,
-    options:
-      | { mode: "warm-resume"; claudeSessionId: string }
-      | { mode: "cold-stateless"; transcript: string }
-  ): Promise<{ ok: boolean; summary?: string; reason?: string }> {
+    options: HandoffSummaryOptions
+  ): Promise<HandoffSummaryResult> {
+    if (normalizeEngineType(cfg.engine) === "antigravity") {
+      return this.antigravityEngine.generateHandoffSummary(cfg, options);
+    }
     if (!cfg.sshHost || !cfg.sshUser || !cfg.sshKeyPath) {
       return { ok: false, reason: "尚未配置远程服务器连接信息，无法压缩记忆。" };
     }
@@ -155,9 +186,9 @@ export class ClaudeClient {
       extraArgs: string[],
       promptText: string,
       logLabel: string
-    ): Promise<{ ok: boolean; summary?: string; reason?: string }> => {
+    ): Promise<HandoffSummaryResult> => {
       const claudeArgs = [
-        shellQuote(cfg.remoteClaudePath || "claude"),
+        shellQuote(resolveRemoteCliPath(cfg)),
         "-p",
         ...extraArgs,
         "--output-format",
@@ -258,21 +289,7 @@ export class ClaudeClient {
       });
     };
 
-    const sharedStructureSpec = [
-      "请严格按下面 3 个固定板块输出中文 Markdown 记忆摘要（总字数控制在 600~1000 字以内，不要调用任何工具，直接输出正文）：",
-      "",
-      "### 1. 当前全局背景",
-      "- 总任务目标、已定案的关键技术结论、涉及的核心文件路径与未提交改动概况。",
-      "",
-      "### 2. 最近 3 轮对话焦点与当前进展（重点！）",
-      "- 围绕**用户最近 3 轮想做的事情**，逐轮梳理并明确标注每件事的当前状态：",
-      "  - **已完成**：哪些改动/确认已经落地到代码或文档；",
-      "  - **已定待改**：哪些用户已同意但尚未动手修改；",
-      "  - **尚未定论**：哪些疑问/设计点还在讨论、卡在哪里、待用户拍板。",
-      "",
-      "### 3. 紧接着下一步",
-      "- 明确新对话接上后最可能需要继续处理的具体事项，避免丢失当前思路。",
-    ].join("\n");
+    const sharedStructureSpec = SHARED_HANDOFF_STRUCTURE_SPEC;
 
     if (options.mode === "warm-resume") {
       if (!options.claudeSessionId) {
@@ -361,7 +378,7 @@ export class ClaudeClient {
     return parts.join("\n\n");
   }
 
-  /** 发起一轮流式远程对话 */
+  /** 发起一轮流式远程对话（按当前服务器引擎自动路由到 Claude Code 或 Antigravity） */
   public runTurn(params: {
     cfg: BridgeConfig;
     prompt: string;
@@ -372,8 +389,12 @@ export class ClaudeClient {
     const { cfg, prompt, claudeSessionId, assistantMsg, callbacks } = params;
     this.abort();
 
+    if (normalizeEngineType(cfg.engine) === "antigravity") {
+      return this.antigravityEngine.runTurn(params);
+    }
+
     const claudeArgs: string[] = [
-      shellQuote(cfg.remoteClaudePath || "claude"),
+      shellQuote(resolveRemoteCliPath(cfg)),
       "-p",
       "--output-format",
       "stream-json",

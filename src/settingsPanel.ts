@@ -6,13 +6,17 @@ import { execFile } from "child_process";
 import * as vscode from "vscode";
 import { BridgeManager } from "./bridgeManager";
 import {
+  AgentEngineType,
   BridgeConfig,
   buildBaseSshArgs,
   ChatTheme,
   EffortLevel,
   expandHomePath,
   getBridgeConfig,
+  getEngineDisplayName,
+  normalizeEngineType,
   PermissionMode,
+  resolveRemoteCliPath,
   resolveSshProxy,
   updateBridgeConfigValues,
   updateChatTheme,
@@ -183,6 +187,9 @@ export class SettingsPanel {
     if (typeof raw.name === "string" && raw.name.trim()) {
       patch.name = raw.name.trim();
     }
+    if (raw.engine === "claude" || raw.engine === "antigravity") {
+      patch.engine = raw.engine;
+    }
     if (typeof raw.sshHost === "string") {
       patch.sshHost = raw.sshHost.trim();
     }
@@ -191,6 +198,9 @@ export class SettingsPanel {
     }
     if (raw.sshPort !== undefined && Number(raw.sshPort) > 0) {
       patch.sshPort = Number(raw.sshPort);
+    }
+    if (raw.remotePort !== undefined && Number(raw.remotePort) > 0) {
+      patch.remotePort = Number(raw.remotePort);
     }
     if (typeof raw.sshKeyPath === "string") {
       patch.sshKeyPath = raw.sshKeyPath.trim();
@@ -305,14 +315,31 @@ export class SettingsPanel {
 
       case "createWizardProfile": {
         const name = String(msg.name ?? "").trim();
+        const engine = normalizeEngineType(msg.engine);
+        const sshHost = String(msg.sshHost ?? "").trim();
         const active = this.profiles.getActiveProfile();
-        const created = await this.profiles.createProfile(name, { makeActive: false });
+        const created = await this.profiles.createProfile(name, {
+          makeActive: false,
+          engine,
+          sshHost,
+        });
         this.wizardTargetProfileId = created.id;
         this.syncState();
         void this.panel.webview.postMessage({
           type: "toast",
           ok: true,
-          message: `已在向导中新建目标档案「${created.name}」，当前聊天仍保持在「${active.name}」不受影响。`,
+          message: `已在向导中新建目标档案「${created.name}」（远程端口 ${created.remotePort}），当前聊天仍保持在「${active.name}」不受影响。`,
+        });
+        break;
+      }
+
+      case "suggestRemotePort": {
+        const sshHost = String(msg.sshHost ?? "").trim();
+        const target = this.getWizardTargetProfile();
+        const suggested = this.profiles.suggestNextRemotePort(sshHost, target.id);
+        void this.panel.webview.postMessage({
+          type: "suggestedRemotePort",
+          port: suggested,
         });
         break;
       }
@@ -904,7 +931,13 @@ export class SettingsPanel {
     raw: Partial<BridgeConfig> & { profileName?: string },
     reconnect: boolean
   ): Promise<void> {
+    const engine = normalizeEngineType(raw.engine);
+    const cliPath = resolveRemoteCliPath({
+      engine,
+      remoteClaudePath: String(raw.remoteClaudePath ?? "").trim(),
+    });
     const patch: Partial<BridgeConfig> = {
+      engine,
       sshHost: String(raw.sshHost ?? "").trim(),
       sshUser: String(raw.sshUser ?? "ubuntu").trim() || "ubuntu",
       sshPort: Number(raw.sshPort) || 22,
@@ -913,7 +946,7 @@ export class SettingsPanel {
       localPort: Number(raw.localPort) || 7676,
       remotePort: Number(raw.remotePort) || 7676,
       devspacePath: String(raw.devspacePath ?? "").trim(),
-      remoteClaudePath: String(raw.remoteClaudePath ?? "claude").trim() || "claude",
+      remoteClaudePath: cliPath,
       permissionMode: (raw.permissionMode ?? "bypassPermissions") as PermissionMode,
       model: String(raw.model ?? "").trim(),
       effort: (raw.effort ?? "") as EffortLevel,
@@ -932,6 +965,7 @@ export class SettingsPanel {
     await updateBridgeConfigValues(patch);
     await this.profiles.saveProfile({
       name: raw.profileName,
+      engine,
       sshHost: patch.sshHost,
       sshUser: patch.sshUser,
       sshPort: patch.sshPort,
@@ -939,6 +973,7 @@ export class SettingsPanel {
       sshProxy: patch.sshProxy,
       remotePort: patch.remotePort,
       remoteClaudePath: patch.remoteClaudePath,
+      model: patch.model,
     });
     this.syncState();
 
@@ -962,16 +997,21 @@ export class SettingsPanel {
 
   private async runConnectionTest(form: Partial<BridgeConfig>): Promise<void> {
     const base = getBridgeConfig();
+    const engine = normalizeEngineType(form.engine ?? base.engine);
+    const cliPath = resolveRemoteCliPath({
+      engine,
+      remoteClaudePath: String(form.remoteClaudePath ?? base.remoteClaudePath),
+    });
     const cfg: BridgeConfig = {
       ...base,
+      engine,
       sshHost: String(form.sshHost ?? base.sshHost).trim(),
       sshUser: String(form.sshUser ?? base.sshUser).trim() || "ubuntu",
       sshPort: Number(form.sshPort) || base.sshPort,
       sshKeyPath: expandHomePath(String(form.sshKeyPath ?? base.sshKeyPath)),
       sshProxy: String(form.sshProxy ?? base.sshProxy).trim() || "auto",
       remotePort: Number(form.remotePort) || base.remotePort,
-      remoteClaudePath:
-        String(form.remoteClaudePath ?? base.remoteClaudePath).trim() || "claude",
+      remoteClaudePath: cliPath,
     };
 
     if (!cfg.sshHost || !cfg.sshKeyPath) {
@@ -997,7 +1037,7 @@ export class SettingsPanel {
     const args = [
       ...buildBaseSshArgs(cfg, { batchMode: true, proxy: proxy ?? null }),
       `${cfg.sshUser}@${cfg.sshHost}`,
-      `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; echo "HOST=$(hostname)"; echo "CLAUDE=$(${cfg.remoteClaudePath || "claude"} --version 2>/dev/null || echo NOT_FOUND)"; echo "MCP=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:${cfg.remotePort}/mcp || echo 000)"`,
+      `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; echo "HOST=$(hostname)"; echo "CLI=$(${cliPath} --version 2>/dev/null | head -n 1 || echo NOT_FOUND)"; echo "MCP=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:${cfg.remotePort}/mcp || echo 000)"`,
     ];
 
     const res = await new Promise<{ ok: boolean; stdout: string; stderr: string }>(
@@ -1037,7 +1077,7 @@ export class SettingsPanel {
     void this.panel.webview.postMessage({
       type: "testResult",
       ok: true,
-      summary: `连接成功（${elapsed}ms · ${proxy ? `代理 ${proxy.host}:${proxy.port}` : "直连"}） | 主机: ${map.HOST || cfg.sshHost} | Claude: ${map.CLAUDE || "未知"} | 隧道端口: ${mcpOk ? "已连通" : "尚未建立"}`,
+      summary: `连接成功（${elapsed}ms · ${proxy ? `代理 ${proxy.host}:${proxy.port}` : "直连"}） | 主机: ${map.HOST || cfg.sshHost} | ${getEngineDisplayName(engine)}: ${map.CLI || "未知"} | 隧道端口 ${cfg.remotePort}: ${mcpOk ? "已连通" : "尚未建立"}`,
     });
   }
 
@@ -1119,10 +1159,18 @@ export class SettingsPanel {
       <div class="grid-3">
         <div class="field span-2">
           <label for="profileName">当前服务器档案名称</label>
-          <input id="profileName" type="text" placeholder="例如 AWS 主力 / RAKsmart 备用" />
+          <input id="profileName" type="text" placeholder="例如 AWS 主力 / 同事 Antigravity" />
         </div>
         <div class="field" style="justify-content: flex-end;">
           <button id="deleteProfileBtn" class="btn secondary small" type="button" style="height: 33px;">删除此档案</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>远程 AI 后端引擎（支持 Claude Code / Antigravity 秒切，后续可扩展 Codex）</label>
+        <div class="seg-group" id="engineModeGroup">
+          <button type="button" class="seg-btn active" data-engine-mode="claude">Claude Code (claude)</button>
+          <button type="button" class="seg-btn" data-engine-mode="antigravity">Google Antigravity (agy)</button>
         </div>
       </div>
 
@@ -1192,8 +1240,8 @@ export class SettingsPanel {
             <input id="devspacePath" type="text" placeholder="留空自动搜索 PATH 与 nvm" />
           </div>
           <div class="field">
-            <label for="remoteClaudePath">远程 claude 命令或路径</label>
-            <input id="remoteClaudePath" type="text" placeholder="claude" />
+            <label for="remoteClaudePath">远程 CLI 命令或路径（Claude 默认 claude，Antigravity 默认 agy）</label>
+            <input id="remoteClaudePath" type="text" placeholder="claude 或 agy" />
           </div>
         </div>
         <div class="inline-actions" style="margin-top: 8px;">
@@ -1486,9 +1534,25 @@ export class SettingsPanel {
           <div class="grid-3">
             <div class="field">
               <label for="wizTargetName">目标档案名称</label>
-              <input id="wizTargetName" type="text" placeholder="例如 RAKsmart / 备用机" />
+              <input id="wizTargetName" type="text" placeholder="例如 同事A-Antigravity / 备用机" />
             </div>
             <div class="field">
+              <label for="wizTargetEngine">远程 AI 后端引擎</label>
+              <select id="wizTargetEngine">
+                <option value="claude">Claude Code (claude)</option>
+                <option value="antigravity">Google Antigravity (agy)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="wizTargetRemotePort">远程隧道端口（同机多人请错开）</label>
+              <div class="input-with-btn">
+                <input id="wizTargetRemotePort" type="number" min="1024" max="65535" placeholder="7676" />
+                <button id="wizSuggestPortBtn" class="btn secondary small" type="button" title="按当前 IP 自动建议不冲突端口">自动</button>
+              </div>
+            </div>
+          </div>
+          <div class="grid-3">
+            <div class="field span-2">
               <label for="wizTargetHost">目标服务器地址 (IP / 域名)</label>
               <input id="wizTargetHost" type="text" placeholder="例如 1.2.3.4" />
             </div>
@@ -1499,8 +1563,8 @@ export class SettingsPanel {
           </div>
           <div class="grid-3">
             <div class="field">
-              <label for="wizTargetUser">SSH 用户名</label>
-              <input id="wizTargetUser" type="text" placeholder="ubuntu 或 claude" />
+              <label for="wizTargetUser">SSH 用户名（同机多人各自独立）</label>
+              <input id="wizTargetUser" type="text" placeholder="ubuntu / claude / alice" />
             </div>
             <div class="field span-2">
               <label for="wizTargetKeyPath">目标本地私钥 (.pem / 无私钥请展开下方用密码一键生成)</label>
@@ -1540,12 +1604,12 @@ export class SettingsPanel {
               <div class="field" style="justify-content:center;">
                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
                   <input id="pwCreateNonRoot" type="checkbox" checked />
-                  <span>root 登录时自动创建普通用户（避免 Claude 禁止 root 全部允许模式）</span>
+                  <span>自动创建独立普通用户（同机 2~4 位同事请为每人建不同用户名）</span>
                 </label>
               </div>
               <div class="field">
-                <label for="pwNewUserName">新建普通用户名</label>
-                <input id="pwNewUserName" type="text" value="claude" placeholder="claude" />
+                <label for="pwNewUserName">新建普通用户名（如 claude / alice / bob）</label>
+                <input id="pwNewUserName" type="text" value="claude" placeholder="claude 或同事英文名" />
               </div>
             </div>
             <div class="inline-actions">
@@ -1593,7 +1657,7 @@ export class SettingsPanel {
           <span class="step-num">3</span>
           <div>
             <h2>免客户端打开远程登录画面（一次性授权）</h2>
-            <p class="card-desc">无需安装 RustDesk！在远程终端输入 <code>claude</code> 登录账号，再输入 <code>/mcp</code> 授权 DevSpace。需要粘贴时点下方「同步本机剪贴板到远程」，浏览器按 <code>Ctrl+V</code>、终端按 <code>Ctrl+Shift+V</code> 即可。</p>
+            <p class="card-desc" id="wizStep3Desc">无需安装 RustDesk！在远程终端输入 <code>claude</code> 登录账号，再输入 <code>/mcp</code> 授权 DevSpace。需要粘贴时点下方「同步本机剪贴板到远程」，浏览器按 <code>Ctrl+V</code>、终端按 <code>Ctrl+Shift+V</code> 即可。</p>
           </div>
         </div>
         <div id="wizDesktopStatus" class="field-hint">当前状态：未启动（平时 0 内存占用）</div>
@@ -1616,7 +1680,7 @@ export class SettingsPanel {
           <span class="step-num">4</span>
           <div>
             <h2>一键验收并切换到此服务器</h2>
-            <p class="card-desc">检查当前目标 VPS 的 Claude 登录与 DevSpace MCP 是否全部绿灯；验收通过后再关闭临时桌面并切换到此服务器对话。</p>
+            <p class="card-desc" id="wizStep4Desc">检查当前目标 VPS 的 CLI 登录与 DevSpace MCP 是否全部绿灯；验收通过后再关闭临时桌面并切换到此服务器对话。</p>
           </div>
         </div>
         <div id="wizVerifyChecklist" class="checklist"></div>

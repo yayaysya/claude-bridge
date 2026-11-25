@@ -3,9 +3,13 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
+  AgentEngineType,
   BridgeConfig,
   expandHomePath,
   getBridgeConfig,
+  getDefaultCliBinary,
+  normalizeEngineType,
+  resolveRemoteCliPath,
   updateBridgeConfigValues,
 } from "./config";
 
@@ -14,15 +18,21 @@ export function profileToBridgeConfig(
   base: BridgeConfig,
   profile: ServerProfile
 ): BridgeConfig {
+  const engine = normalizeEngineType(profile.engine);
   return {
     ...base,
+    engine,
     sshHost: profile.sshHost.trim(),
     sshUser: profile.sshUser.trim() || "ubuntu",
     sshPort: Number(profile.sshPort) || 22,
     sshKeyPath: expandHomePath(profile.sshKeyPath.trim()),
     sshProxy: profile.sshProxy.trim() || "auto",
     remotePort: Number(profile.remotePort) || 7676,
-    remoteClaudePath: profile.remoteClaudePath.trim() || "claude",
+    remoteClaudePath: resolveRemoteCliPath({
+      engine,
+      remoteClaudePath: profile.remoteClaudePath,
+    }),
+    model: profile.model !== undefined ? profile.model : base.model,
   };
 }
 
@@ -30,6 +40,8 @@ export function profileToBridgeConfig(
 export interface ServerProfile {
   id: string;
   name: string;
+  /** 远程 CLI 后端引擎：claude | antigravity（旧档案缺省视为 claude） */
+  engine: AgentEngineType;
   sshHost: string;
   sshUser: string;
   sshPort: number;
@@ -37,6 +49,8 @@ export interface ServerProfile {
   sshProxy: string;
   remotePort: number;
   remoteClaudePath: string;
+  /** 该档案偏好的模型名（切换 Claude/Antigravity 服务器时自动隔离，互不串模型） */
+  model?: string;
 }
 
 interface ProfilesFileData {
@@ -81,23 +95,48 @@ export class ProfileStore {
     return found ? { ...found } : undefined;
   }
 
+  /** 为同机多用户自动建议不冲突的远程隧道端口（7676, 7677, 7678...） */
+  public suggestNextRemotePort(sshHost: string, excludeProfileId?: string): number {
+    const cleanHost = sshHost.trim().toLowerCase();
+    const usedPorts = new Set<number>();
+    for (const p of this.profiles) {
+      if (excludeProfileId && p.id === excludeProfileId) {
+        continue;
+      }
+      if (!cleanHost || p.sshHost.trim().toLowerCase() === cleanHost) {
+        usedPorts.add(Number(p.remotePort) || 7676);
+      }
+    }
+    let port = 7676;
+    while (usedPorts.has(port) && port < 7776) {
+      port += 1;
+    }
+    return port;
+  }
+
   /** 新增一个空白服务器档案（默认激活；向导新建时可传 makeActive: false 避免影响聊天主力机） */
   public async createProfile(
     name?: string,
-    options?: { makeActive?: boolean }
+    options?: { makeActive?: boolean; engine?: AgentEngineType; sshHost?: string }
   ): Promise<ServerProfile> {
     const makeActive = options?.makeActive ?? true;
+    const engine = normalizeEngineType(options?.engine);
     const idx = this.profiles.length + 1;
+    const suggestedPort = options?.sshHost
+      ? this.suggestNextRemotePort(options.sshHost)
+      : 7676;
     const profile: ServerProfile = {
       id: `vps_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: (name || "").trim() || `VPS 服务器 ${idx}`,
-      sshHost: "",
+      engine,
+      sshHost: (options?.sshHost || "").trim(),
       sshUser: "ubuntu",
       sshPort: 22,
       sshKeyPath: "",
       sshProxy: "auto",
-      remotePort: 7676,
-      remoteClaudePath: "claude",
+      remotePort: suggestedPort,
+      remoteClaudePath: getDefaultCliBinary(engine),
+      model: "",
     };
     this.profiles.push(profile);
     if (makeActive) {
@@ -122,12 +161,27 @@ export class ProfileStore {
       existing = this.profiles[0];
     }
 
+    const nextEngine =
+      patch.engine !== undefined
+        ? normalizeEngineType(patch.engine)
+        : normalizeEngineType(existing.engine);
+    const engineChanged = nextEngine !== normalizeEngineType(existing.engine);
+    const rawCliPath =
+      patch.remoteClaudePath !== undefined
+        ? patch.remoteClaudePath.trim()
+        : existing.remoteClaudePath;
+    const nextCliPath = resolveRemoteCliPath({
+      engine: nextEngine,
+      remoteClaudePath: rawCliPath,
+    });
+
     const updated: ServerProfile = {
       id: existing.id,
       name:
         patch.name !== undefined
           ? patch.name.trim() || existing.name
           : existing.name,
+      engine: nextEngine,
       sshHost:
         patch.sshHost !== undefined ? patch.sshHost.trim() : existing.sshHost,
       sshUser:
@@ -150,10 +204,13 @@ export class ProfileStore {
         patch.remotePort !== undefined
           ? Number(patch.remotePort) || 7676
           : existing.remotePort,
-      remoteClaudePath:
-        patch.remoteClaudePath !== undefined
-          ? patch.remoteClaudePath.trim() || "claude"
-          : existing.remoteClaudePath,
+      remoteClaudePath: nextCliPath,
+      model:
+        patch.model !== undefined
+          ? patch.model.trim()
+          : engineChanged
+            ? ""
+            : existing.model,
     };
 
     const idx = this.profiles.findIndex((p) => p.id === existing!.id);
@@ -235,8 +292,18 @@ export class ProfileStore {
         const raw = fs.readFileSync(PROFILES_FILE, "utf8");
         const parsed = JSON.parse(raw) as ProfilesFileData;
         if (parsed && Array.isArray(parsed.profiles) && parsed.profiles.length > 0) {
-          this.profiles = parsed.profiles;
-          this.activeProfileId = parsed.activeProfileId || parsed.profiles[0].id;
+          this.profiles = parsed.profiles.map((p) => {
+            const eng = normalizeEngineType(p.engine);
+            return {
+              ...p,
+              engine: eng,
+              remoteClaudePath: resolveRemoteCliPath({
+                engine: eng,
+                remoteClaudePath: p.remoteClaudePath,
+              }),
+            };
+          });
+          this.activeProfileId = parsed.activeProfileId || this.profiles[0].id;
           if (!this.profiles.some((p) => p.id === this.activeProfileId)) {
             this.activeProfileId = this.profiles[0].id;
           }
@@ -248,16 +315,19 @@ export class ProfileStore {
     }
 
     const cfg: BridgeConfig = getBridgeConfig();
+    const initialEngine = normalizeEngineType(cfg.engine);
     const initial: ServerProfile = {
       id: "default",
       name: cfg.sshHost ? "主力服务器" : "默认服务器",
+      engine: initialEngine,
       sshHost: cfg.sshHost,
       sshUser: cfg.sshUser || "ubuntu",
       sshPort: cfg.sshPort || 22,
       sshKeyPath: cfg.sshKeyPath,
       sshProxy: cfg.sshProxy || "auto",
       remotePort: cfg.remotePort || 7676,
-      remoteClaudePath: cfg.remoteClaudePath || "claude",
+      remoteClaudePath: resolveRemoteCliPath(cfg),
+      model: cfg.model || "",
     };
     this.profiles = [initial];
     this.activeProfileId = initial.id;
@@ -265,14 +335,20 @@ export class ProfileStore {
   }
 
   private async applyToVsCodeConfig(profile: ServerProfile): Promise<void> {
+    const engine = normalizeEngineType(profile.engine);
     await updateBridgeConfigValues({
+      engine,
       sshHost: profile.sshHost,
       sshUser: profile.sshUser,
       sshPort: profile.sshPort,
       sshKeyPath: profile.sshKeyPath,
       sshProxy: profile.sshProxy,
       remotePort: profile.remotePort,
-      remoteClaudePath: profile.remoteClaudePath,
+      remoteClaudePath: resolveRemoteCliPath({
+        engine,
+        remoteClaudePath: profile.remoteClaudePath,
+      }),
+      model: profile.model !== undefined ? profile.model : "",
     });
   }
 

@@ -8,6 +8,9 @@ import {
   BridgeConfig,
   buildBaseSshArgs,
   expandHomePath,
+  getRemoteSkillsDir,
+  normalizeEngineType,
+  resolveRemoteCliPath,
   shellQuote,
 } from "./config";
 import { ChatSession } from "./sessionStore";
@@ -257,9 +260,11 @@ export class SkillManager {
       dirName: string;
       files: Array<{ relPath: string; contentB64: string }>;
     }> = [];
+    const engine = normalizeEngineType(cfg.engine);
+    const remoteSkillsDir = getRemoteSkillsDir(engine);
     const hasher = crypto.createHash("sha256");
-    const targetKey = `${cfg.sshUser}@${cfg.sshHost}:${cfg.sshPort || 22}`;
-    hasher.update(`${targetKey}\n`);
+    const targetKey = `${engine}:${cfg.sshUser}@${cfg.sshHost}:${cfg.sshPort || 22}`;
+    hasher.update(`${targetKey}\n${remoteSkillsDir}\n`);
 
     let totalBytes = 0;
     let totalFiles = 0;
@@ -310,12 +315,12 @@ export class SkillManager {
       };
     }
 
-    const payload = JSON.stringify({ skills: bundleItems });
+    const payload = JSON.stringify({ targetDir: remoteSkillsDir, skills: bundleItems });
     const remoteScript = [
       "python3 -c '",
       "import base64, json, os, sys",
       "data = json.loads(sys.stdin.read())",
-      "root = os.path.expanduser(\"~/.claude/skills\")",
+      "root = os.path.expanduser(data.get(\"targetDir\") or \"~/.claude/skills\")",
       "os.makedirs(root, exist_ok=True)",
       "written = 0",
       "for sk in data.get(\"skills\", []):",
@@ -394,7 +399,7 @@ export class SkillManager {
       skillCount: bundleItems.length,
       fileCount: totalFiles,
       bytes: totalBytes,
-      message: `已同步 ${bundleItems.length} 个本地 Skill（${names}）到远程 ~/.claude/skills/。`,
+      message: `已同步 ${bundleItems.length} 个本地 Skill（${names}）到远程 ${remoteSkillsDir}/。`,
     };
   }
 
@@ -466,21 +471,36 @@ export class SkillManager {
       userLines.reverse().join("\n"),
     ].join("\n");
 
+    const engine = normalizeEngineType(cfg.engine);
+    const cliBin = shellQuote(resolveRemoteCliPath(cfg));
+
     const runExtract = (modelArgs: string[]) => {
-      const claudeArgs = [
-        shellQuote(cfg.remoteClaudePath || "claude"),
-        "-p",
-        "--no-session-persistence",
-        ...modelArgs,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--permission-mode",
-        "plan",
-        "--max-turns",
-        "1",
-      ];
-      const remoteCmd = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; exec ${claudeArgs.join(" ")}`;
+      const cliArgs =
+        engine === "antigravity"
+          ? [
+              cliBin,
+              "--input-format",
+              "stream-json",
+              "--output-format",
+              "stream-json",
+              "--mode",
+              "plan",
+              ...modelArgs,
+            ]
+          : [
+              cliBin,
+              "-p",
+              "--no-session-persistence",
+              ...modelArgs,
+              "--output-format",
+              "stream-json",
+              "--verbose",
+              "--permission-mode",
+              "plan",
+              "--max-turns",
+              "1",
+            ];
+      const remoteCmd = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; exec ${cliArgs.join(" ")}`;
       const sshArgs = [
         ...buildBaseSshArgs(cfg, { batchMode: true }),
         `${cfg.sshUser}@${cfg.sshHost}`,
@@ -521,15 +541,28 @@ export class SkillManager {
             if (!line.startsWith("{")) continue;
             try {
               const evt = JSON.parse(line) as Record<string, unknown>;
-              if (evt.type === "result" && typeof evt.result === "string") {
+              if (engine === "antigravity") {
+                if (evt.event === "step_update") {
+                  const su = evt.step_update as Record<string, unknown> | undefined;
+                  if (su?.step_type === "agent_response" && typeof su.text_delta === "string") {
+                    resultText += su.text_delta;
+                  }
+                } else if (evt.event === "result") {
+                  const r = evt.result as Record<string, unknown> | undefined;
+                  if (typeof r?.response === "string" && r.response.trim()) {
+                    resultText = r.response.trim();
+                  }
+                }
+              } else if (evt.type === "result" && typeof evt.result === "string") {
                 resultText = evt.result.trim();
               }
             } catch {
               // 忽略
             }
           }
-          if (/hit your 5-hour limit|rate limit/i.test(resultText)) {
-            finish({ ok: false, text: "", reason: "当前 5 小时额度已用完，请重置后再试。" });
+          resultText = resultText.trim();
+          if (/hit your 5-hour limit|rate limit|quota/i.test(resultText)) {
+            finish({ ok: false, text: "", reason: "当前额度已用完，请重置后再试。" });
             return;
           }
           if (code !== 0 || !resultText) {
@@ -542,16 +575,25 @@ export class SkillManager {
           }
           finish({ ok: true, text: resultText, reason: "" });
         });
-        child.stdin?.write(prompt, "utf8");
+        if (engine === "antigravity") {
+          const payload = JSON.stringify({ event: "user", message: { content: prompt } });
+          child.stdin?.write(`${payload}\n`, "utf8");
+        } else {
+          child.stdin?.write(prompt, "utf8");
+        }
         child.stdin?.end();
       });
     };
 
     this.output.appendLine(
-      `[Habit] 正在基于近期 ${userLines.length} 条用户发言提炼新习惯...`
+      `[Habit] 正在基于近期 ${userLines.length} 条用户发言提炼新习惯 (${engine})...`
     );
-    let res = await runExtract(["--model", "sonnet"]);
-    if (!res.ok && /model|invalid|not found/i.test(res.reason)) {
+    const preferredModelArgs =
+      engine === "antigravity"
+        ? ["--model", shellQuote("gemini-3.8-flash-medium")]
+        : ["--model", "sonnet"];
+    let res = await runExtract(preferredModelArgs);
+    if (!res.ok && /model|invalid|not found|recognized/i.test(res.reason)) {
       res = await runExtract([]);
     }
     if (!res.ok) {

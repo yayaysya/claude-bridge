@@ -28,14 +28,17 @@ function hasNativeNc(): boolean {
   return cachedHasNativeNc;
 }
 
-/** 远程 Claude Code 支持的权限模式 */
+/** 远程 AI CLI 后端引擎类型（后续扩展 codex 只需在此追加类型并注册对应 Engine） */
+export type AgentEngineType = "claude" | "antigravity";
+
+/** 远程 CLI 支持的权限模式 */
 export type PermissionMode =
   | "bypassPermissions"
   | "acceptEdits"
   | "plan"
   | "dontAsk";
 
-/** 远程 Claude Code 支持的思考强度档位（空字符串表示跟随默认） */
+/** 远程 CLI 支持的思考强度档位（空字符串表示跟随默认） */
 export type EffortLevel = "" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** 聊天面板与设置中心内置完整视觉主题 */
@@ -43,6 +46,7 @@ export type ChatTheme = "claude" | "wechat" | "feishu" | "vscode";
 
 /** 插件核心运行配置 */
 export interface BridgeConfig {
+  engine: AgentEngineType;
   sshHost: string;
   sshUser: string;
   sshPort: number;
@@ -63,6 +67,52 @@ export interface BridgeConfig {
   syncLocalRules: boolean;
   syncLocalSkills: boolean;
   localClaudeMdPaths: string[];
+}
+
+/** 规范化后端引擎类型，兼容旧版配置缺省值 */
+export function normalizeEngineType(raw: unknown): AgentEngineType {
+  return raw === "antigravity" ? "antigravity" : "claude";
+}
+
+/** 获取后端引擎的友好显示名称 */
+export function getEngineDisplayName(engine: AgentEngineType): string {
+  return engine === "antigravity" ? "Antigravity (agy)" : "Claude Code";
+}
+
+/** 获取后端引擎的短标签 */
+export function getEngineShortBadge(engine: AgentEngineType): string {
+  return engine === "antigravity" ? "AGY" : "Claude";
+}
+
+/** 获取后端引擎默认 CLI 命令名 */
+export function getDefaultCliBinary(engine: AgentEngineType): string {
+  return engine === "antigravity" ? "agy" : "claude";
+}
+
+/** 解析实际应执行的远程 CLI 路径（自动避免切换引擎时沿用另一引擎的默认命令名） */
+export function resolveRemoteCliPath(cfg: Pick<BridgeConfig, "engine" | "remoteClaudePath">): string {
+  const engine = normalizeEngineType(cfg.engine);
+  const raw = (cfg.remoteClaudePath || "").trim();
+  if (!raw) {
+    return getDefaultCliBinary(engine);
+  }
+  if (engine === "antigravity" && raw === "claude") {
+    return "agy";
+  }
+  if (engine === "claude" && raw === "agy") {
+    return "claude";
+  }
+  return raw;
+}
+
+/** 获取远程规则文件路径（Claude -> ~/.claude/CLAUDE.md；Antigravity -> ~/.gemini/GEMINI.md） */
+export function getRemoteRulesPath(engine: AgentEngineType): string {
+  return engine === "antigravity" ? "~/.gemini/GEMINI.md" : "~/.claude/CLAUDE.md";
+}
+
+/** 获取远程 Skill 目录路径（Claude -> ~/.claude/skills；Antigravity -> ~/.gemini/config/skills） */
+export function getRemoteSkillsDir(engine: AgentEngineType): string {
+  return engine === "antigravity" ? "~/.gemini/config/skills" : "~/.claude/skills";
 }
 
 /** 展开路径开头的 ~ 为当前用户家目录 */
@@ -140,7 +190,11 @@ export function getBridgeConfig(): BridgeConfig {
     ? (themeRaw as ChatTheme)
     : "claude";
 
+  const engineRaw = readCompat<string>(cfg, legacy, "engine", "claude").trim();
+  const resolvedEngine = normalizeEngineType(engineRaw);
+
   return {
+    engine: resolvedEngine,
     sshHost: readCompat<string>(cfg, legacy, "sshHost", "").trim(),
     sshUser: readCompat<string>(cfg, legacy, "sshUser", "ubuntu").trim(),
     sshPort: readCompat<number>(cfg, legacy, "sshPort", 22),
@@ -195,6 +249,11 @@ export async function updateBridgeConfigValues(
       await cfg.update(key, value, vscode.ConfigurationTarget.Global);
     }
   }
+}
+
+/** 更新远程 CLI 后端引擎 */
+export async function updateEngine(engine: AgentEngineType): Promise<void> {
+  await updateBridgeConfigValues({ engine });
 }
 
 /** 更新全局权限模式 */

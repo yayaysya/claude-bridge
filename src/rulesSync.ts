@@ -3,7 +3,13 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawn } from "child_process";
 import * as vscode from "vscode";
-import { BridgeConfig, buildBaseSshArgs, expandHomePath } from "./config";
+import {
+  BridgeConfig,
+  buildBaseSshArgs,
+  expandHomePath,
+  getRemoteRulesPath,
+  normalizeEngineType,
+} from "./config";
 
 const MARKER_START = "<!-- EC2-CLAUDE-BRIDGE:LOCAL-RULES:START -->";
 const MARKER_END = "<!-- EC2-CLAUDE-BRIDGE:LOCAL-RULES:END -->";
@@ -96,9 +102,11 @@ export class RulesSyncManager {
       })
       .join("\n\n---\n\n");
 
+    const engine = normalizeEngineType(cfg.engine);
+    const remoteRulePath = getRemoteRulesPath(engine);
     const hash = crypto
       .createHash("sha256")
-      .update(`${cfg.sshHost}:${cfg.sshUser}\n${mergedBody}`)
+      .update(`${engine}:${cfg.sshHost}:${cfg.sshUser}:${remoteRulePath}\n${mergedBody}`)
       .digest("hex");
 
     const savedHash =
@@ -110,11 +118,12 @@ export class RulesSyncManager {
         skippedUnchanged: true,
         files: existingFiles.map((f) => f.filePath),
         bytes: Buffer.byteLength(mergedBody, "utf8"),
-        message: "本地 CLAUDE.md 无变化，已跳过重复同步。",
+        message: "本地规则文件无变化，已跳过重复同步。",
       };
     }
 
     const payload = JSON.stringify({
+      targetPath: remoteRulePath,
       markerStart: MARKER_START,
       markerEnd: MARKER_END,
       defaultHeader: DEFAULT_ROUTING_HEADER,
@@ -126,7 +135,7 @@ export class RulesSyncManager {
       "python3 -c '",
       "import json, os, sys",
       "data = json.loads(sys.stdin.read())",
-      "target = os.path.expanduser(\"~/.claude/CLAUDE.md\")",
+      "target = os.path.expanduser(data[\"targetPath\"])",
       "os.makedirs(os.path.dirname(target), exist_ok=True)",
       "existing = open(target, \"r\", encoding=\"utf-8\").read() if os.path.exists(target) else \"\"",
       "s, e = data[\"markerStart\"], data[\"markerEnd\"]",
@@ -152,7 +161,7 @@ export class RulesSyncManager {
     ];
 
     this.output.appendLine(
-      `[RulesSync] 正在同步 ${existingFiles.length} 个本地规则文件到远程 ~/.claude/CLAUDE.md`
+      `[RulesSync] 正在同步 ${existingFiles.length} 个本地规则文件到远程 ${remoteRulePath}`
     );
 
     const execResult = await new Promise<{
@@ -200,7 +209,7 @@ export class RulesSyncManager {
       ok: true,
       files: existingFiles.map((f) => f.filePath),
       bytes: totalBytes,
-      message: `已同步本地规则（${fileNames}，${totalBytes} 字节）到远程 ~/.claude/CLAUDE.md`,
+      message: `已同步本地规则（${fileNames}，${totalBytes} 字节）到远程 ${remoteRulePath}`,
     };
   }
 }

@@ -97,10 +97,18 @@ export interface RateLimitWindow {
   status?: string;
 }
 
+/** 多模型池额度摘要（例如 Antigravity 的 Gemini 池与 Claude/GPT 池） */
+export interface QuotaPoolSummary {
+  label: string;
+  fiveHour?: RateLimitWindow;
+  sevenDay?: RateLimitWindow;
+}
+
 /** 持久化的最近一次官方额度与上下文快照 */
 export interface QuotaSnapshot {
   fiveHour?: RateLimitWindow;
   sevenDay?: RateLimitWindow;
+  secondaryPools?: QuotaPoolSummary[];
   status?: string;
   isUsingOverage?: boolean;
   updatedAt: number;

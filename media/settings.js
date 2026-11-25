@@ -1,6 +1,7 @@
 (function () {
   const vscode = acquireVsCodeApi();
   let currentProxyMode = "auto";
+  let currentEngineMode = "claude";
   let rulePaths = ["~/.claude/CLAUDE.md"];
   let envProxyStr = "";
   let cachedOwnerToken = "";
@@ -56,13 +57,16 @@
       sm.textContent = "";
       return;
     }
+    const isAgy = r.engine === "antigravity";
+    const cliTitle = isAgy ? "Antigravity" : "Claude";
+    const acctTitle = isAgy ? "Google 账号" : "Claude 账号";
     const pill = (ok, label) =>
       '<span class="check-pill ' + (ok ? "ok" : "warn") + '">' + (ok ? "✓ " : "✗ ") + escapeHtml(label) + "</span>";
     cl.innerHTML =
       pill(r.sshOk, "SSH 连通") +
-      pill(r.claudeInstalled, r.claudeInstalled ? "Claude " + r.claudeVersion : "Claude 未安装") +
-      pill(r.claudeLoggedIn, r.claudeLoggedIn ? "Claude 账号已登录" : "Claude 未登录") +
-      pill(r.devspaceMcpConnected, r.devspaceMcpConnected ? "DevSpace MCP 已授权" : "DevSpace 未授权");
+      pill(r.claudeInstalled, r.claudeInstalled ? cliTitle + " " + r.claudeVersion : cliTitle + " 未安装") +
+      pill(r.claudeLoggedIn, r.claudeLoggedIn ? acctTitle + "已登录" : acctTitle + "未登录") +
+      pill(r.devspaceMcpConnected, r.devspaceMcpConnected ? "DevSpace MCP 已连通" : "DevSpace 未就绪");
     sm.textContent = r.summary || "";
   }
 
@@ -91,9 +95,27 @@
     renderWizardVerifyResult(st.verifyResult);
   }
 
+  function updateWizardEngineHints(engine) {
+    const isAgy = engine === "antigravity";
+    const step3 = $("wizStep3Desc");
+    if (step3) {
+      step3.innerHTML = isAgy
+        ? '无需安装 RustDesk！在远程终端输入 <code>agy</code> 按提示在弹出浏览器登录同事自己的 Google 账号，再输入 <code>/mcp</code> 检查 DevSpace 授权。需要粘贴时点下方「同步本机剪贴板到远程」，浏览器按 <code>Ctrl+V</code>、终端按 <code>Ctrl+Shift+V</code>。'
+        : '无需安装 RustDesk！在远程终端输入 <code>claude</code> 登录账号，再输入 <code>/mcp</code> 授权 DevSpace。需要粘贴时点下方「同步本机剪贴板到远程」，浏览器按 <code>Ctrl+V</code>、终端按 <code>Ctrl+Shift+V</code> 即可。';
+    }
+    const step4 = $("wizStep4Desc");
+    if (step4) {
+      step4.textContent = isAgy
+        ? "检查当前目标 VPS 的 Antigravity (agy) 安装、Google 账号登录与 DevSpace MCP 是否全部绿灯；验收通过后关闭临时桌面即可开始对话。"
+        : "检查当前目标 VPS 的 Claude 登录与 DevSpace MCP 是否全部绿灯；验收通过后再关闭临时桌面并切换到此服务器对话。";
+    }
+  }
+
   function collectWizardTargetForm() {
     return {
       name: $("wizTargetName").value.trim(),
+      engine: $("wizTargetEngine") ? $("wizTargetEngine").value : "claude",
+      remotePort: Number($("wizTargetRemotePort")?.value) || 7676,
       sshHost: $("wizTargetHost").value.trim(),
       sshPort: Number($("wizTargetPort").value) || 22,
       sshUser: $("wizTargetUser").value.trim() || "ubuntu",
@@ -351,6 +373,43 @@
     });
   }
 
+  function setEngineMode(mode) {
+    currentEngineMode = mode === "antigravity" ? "antigravity" : "claude";
+    document.querySelectorAll("#engineModeGroup .seg-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.engineMode === currentEngineMode);
+    });
+    const cliInput = $("remoteClaudePath");
+    if (cliInput) {
+      const cur = cliInput.value.trim();
+      if (currentEngineMode === "antigravity" && (!cur || cur === "claude")) {
+        cliInput.value = "agy";
+      } else if (currentEngineMode === "claude" && (!cur || cur === "agy")) {
+        cliInput.value = "claude";
+      }
+    }
+  }
+
+  document.querySelectorAll("#engineModeGroup .seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setEngineMode(btn.dataset.engineMode || "claude");
+    });
+  });
+
+  if ($("wizTargetEngine")) {
+    $("wizTargetEngine").addEventListener("change", () => {
+      updateWizardEngineHints($("wizTargetEngine").value);
+    });
+  }
+
+  if ($("wizSuggestPortBtn")) {
+    $("wizSuggestPortBtn").addEventListener("click", () => {
+      vscode.postMessage({
+        type: "suggestRemotePort",
+        sshHost: $("wizTargetHost").value.trim(),
+      });
+    });
+  }
+
   function collectFormConfig() {
     let sshProxy = "auto";
     if (currentProxyMode === "off") {
@@ -361,6 +420,7 @@
 
     return {
       profileName: $("profileName").value.trim(),
+      engine: currentEngineMode,
       sshHost: $("sshHost").value.trim(),
       sshUser: $("sshUser").value.trim() || "ubuntu",
       sshPort: Number($("sshPort").value) || 22,
@@ -369,7 +429,9 @@
       localPort: Number($("localPort").value) || 7676,
       remotePort: Number($("remotePort").value) || 7676,
       devspacePath: $("devspacePath").value.trim(),
-      remoteClaudePath: $("remoteClaudePath").value.trim() || "claude",
+      remoteClaudePath:
+        $("remoteClaudePath").value.trim() ||
+        (currentEngineMode === "antigravity" ? "agy" : "claude"),
       permissionMode: $("permissionMode").value,
       model: $("model").value.trim(),
       effort: $("effort").value,
@@ -412,9 +474,11 @@
         (profiles || [])
           .map((p) => {
             const isAct = p.id === activeProfileId;
+            const engTag = p.engine === "antigravity" ? "AGY" : "Claude";
+            const portTag = p.remotePort && Number(p.remotePort) !== 7676 ? ":" + p.remotePort : "";
             const hostSub = p.sshHost
-              ? '<span class="profile-chip-host">' + escapeHtml(p.sshHost) + "</span>"
-              : '<span class="profile-chip-host">未配置</span>';
+              ? '<span class="profile-chip-host">' + escapeHtml(engTag + " · " + p.sshHost + portTag) + "</span>"
+              : '<span class="profile-chip-host">' + escapeHtml(engTag + " · 未配置") + "</span>";
             return (
               '<button type="button" class="profile-chip ' + (isAct ? "active" : "") + '" data-select-profile="' + escapeHtml(p.id) + '">' +
               "<span>" + (isAct ? "● " : "") + escapeHtml(p.name) + "</span>" +
@@ -452,9 +516,11 @@
           .map((p) => {
             const isTarget = p.id === nextWizId;
             const isChatActive = p.id === activeProfileId;
+            const engTag = p.engine === "antigravity" ? "AGY" : "Claude";
+            const portTag = p.remotePort && Number(p.remotePort) !== 7676 ? ":" + p.remotePort : "";
             const hostSub = p.sshHost
-              ? '<span class="profile-chip-host">' + escapeHtml(p.sshHost) + "</span>"
-              : '<span class="profile-chip-host">未配置</span>';
+              ? '<span class="profile-chip-host">' + escapeHtml(engTag + " · " + p.sshHost + portTag) + "</span>"
+              : '<span class="profile-chip-host">' + escapeHtml(engTag + " · 未配置") + "</span>";
             const chatBadge = isChatActive
               ? '<span class="profile-chip-badge">聊天中</span>'
               : "";
@@ -777,6 +843,8 @@
         const targetKey = JSON.stringify([
           wizProf.id,
           wizProf.name,
+          wizProf.engine || "claude",
+          wizProf.remotePort || 7676,
           wizProf.sshHost,
           wizProf.sshPort,
           wizProf.sshUser,
@@ -785,10 +853,17 @@
         if (switchedWizTarget || targetKey !== lastSyncedWizardTargetKey) {
           lastSyncedWizardTargetKey = targetKey;
           $("wizTargetName").value = wizProf.name || "";
+          if ($("wizTargetEngine")) {
+            $("wizTargetEngine").value = wizProf.engine || "claude";
+          }
+          if ($("wizTargetRemotePort")) {
+            $("wizTargetRemotePort").value = wizProf.remotePort || 7676;
+          }
           $("wizTargetHost").value = wizProf.sshHost || "";
           $("wizTargetPort").value = wizProf.sshPort || 22;
           $("wizTargetUser").value = wizProf.sshUser || "ubuntu";
           $("wizTargetKeyPath").value = wizProf.sshKeyPath || "";
+          updateWizardEngineHints(wizProf.engine || "claude");
           const st = getWizardStore(wizProf.id);
           if (wizProf.sshHost && !st.pwHost) {
             st.pwHost = wizProf.sshHost;
@@ -801,6 +876,7 @@
       }
 
       $("profileName").value = (actProf && actProf.name) || "主力服务器";
+      setEngineMode((actProf && actProf.engine) || cfg.engine || "claude");
       $("sshHost").value = cfg.sshHost || "";
       $("sshUser").value = cfg.sshUser || "ubuntu";
       $("sshPort").value = cfg.sshPort || 22;
@@ -808,7 +884,8 @@
       $("localPort").value = cfg.localPort || 7676;
       $("remotePort").value = cfg.remotePort || 7676;
       $("devspacePath").value = cfg.devspacePath || "";
-      $("remoteClaudePath").value = cfg.remoteClaudePath || "claude";
+      $("remoteClaudePath").value =
+        cfg.remoteClaudePath || (currentEngineMode === "antigravity" ? "agy" : "claude");
       $("permissionMode").value = cfg.permissionMode || "bypassPermissions";
       $("model").value = cfg.model || "";
       $("effort").value = cfg.effort || "";
@@ -944,6 +1021,14 @@
 
     if (msg.type === "pickedWizardKeyFile") {
       $("wizTargetKeyPath").value = msg.path || "";
+      return;
+    }
+
+    if (msg.type === "suggestedRemotePort") {
+      if ($("wizTargetRemotePort") && msg.port) {
+        $("wizTargetRemotePort").value = String(msg.port);
+        showToast(true, "已自动分配不冲突的远程隧道端口：" + msg.port);
+      }
       return;
     }
 

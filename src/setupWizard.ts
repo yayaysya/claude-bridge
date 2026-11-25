@@ -5,10 +5,15 @@ import * as path from "path";
 import { ChildProcess, execFile, spawn } from "child_process";
 import * as vscode from "vscode";
 import {
+  AgentEngineType,
   BridgeConfig,
   buildBaseSshArgs,
+  getEngineDisplayName,
+  normalizeEngineType,
   resolveDevspaceBinary,
+  resolveRemoteCliPath,
   resolveSshProxy,
+  shellQuote,
 } from "./config";
 import { BridgeLogger } from "./logger";
 
@@ -28,6 +33,7 @@ export interface LocalSetupStatus {
 
 /** 远程验收检测结果 */
 export interface RemoteVerifyResult {
+  engine?: AgentEngineType;
   sshOk: boolean;
   claudeInstalled: boolean;
   claudeVersion: string;
@@ -58,6 +64,23 @@ export interface PasswordlessSetupResult {
 }
 
 const LOCAL_NOVNC_PORT = 6080;
+
+/** 按 remotePort 偏移分配独立的远程 X11/VNC/noVNC 端口，确保同机 2~4 位同事登录桌面互不冲突 */
+function computeRemoteDesktopPorts(remotePort: number): {
+  displayNum: string;
+  xIndex: number;
+  vncPort: number;
+  novncPort: number;
+} {
+  const offset = Math.max(0, Math.min(20, (Number(remotePort) || 7676) - 7676));
+  const xIndex = 1 + offset;
+  return {
+    displayNum: `:${xIndex}`,
+    xIndex,
+    vncPort: 5901 + offset,
+    novncPort: 6080 + offset,
+  };
+}
 
 /**
  * 图形化「新机配置向导」后端引擎
@@ -297,7 +320,7 @@ export class SetupWizardManager implements vscode.Disposable {
     }
 
     const needCreateUser =
-      loginUser === "root" && params.createNonRootUser;
+      params.createNonRootUser && newUserName !== loginUser;
     if (needCreateUser && !/^[a-z_][a-z0-9_-]{1,30}$/.test(newUserName)) {
       return {
         ok: false,
@@ -308,11 +331,16 @@ export class SetupWizardManager implements vscode.Disposable {
       };
     }
 
-    // 1. 生成或复用专属 ed25519 密钥对
+    // 1. 生成或复用专属 ed25519 密钥对（同机创建不同同事账号时按用户名区分私钥，避免互相覆盖）
     const sshDir = path.join(os.homedir(), ".ssh");
     fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
     const safeHost = host.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const keyPath = path.join(sshDir, `claude-bridge_${safeHost}`);
+    const targetUserForKey = needCreateUser ? newUserName : loginUser;
+    const keySuffix =
+      needCreateUser && targetUserForKey !== "claude" && targetUserForKey !== "ubuntu"
+        ? `_${targetUserForKey}`
+        : "";
+    const keyPath = path.join(sshDir, `claude-bridge_${safeHost}${keySuffix}`);
     const pubPath = `${keyPath}.pub`;
 
     if (!fs.existsSync(keyPath) || !fs.existsSync(pubPath)) {
@@ -367,25 +395,26 @@ export class SetupWizardManager implements vscode.Disposable {
     ];
 
     if (needCreateUser) {
+      const suPrefix = loginUser === "root" ? "" : "sudo ";
       remoteLines.push(
         `TARGET_USER="${newUserName}"`,
         'if ! id -u "$TARGET_USER" >/dev/null 2>&1; then',
-        '  useradd -m -s /bin/bash "$TARGET_USER"',
+        `  ${suPrefix}useradd -m -s /bin/bash "$TARGET_USER"`,
         '  echo "CREATED_USER=$TARGET_USER"',
         "else",
         '  echo "REUSED_USER=$TARGET_USER"',
         "fi",
         'if command -v sudo >/dev/null 2>&1 || [ -d /etc/sudoers.d ]; then',
-        '  mkdir -p /etc/sudoers.d',
-        '  printf "%s ALL=(ALL) NOPASSWD:ALL\\n" "$TARGET_USER" > "/etc/sudoers.d/90-claude-bridge-$TARGET_USER"',
-        '  chmod 440 "/etc/sudoers.d/90-claude-bridge-$TARGET_USER"',
+        `  ${suPrefix}mkdir -p /etc/sudoers.d`,
+        `  printf "%s ALL=(ALL) NOPASSWD:ALL\\n" "$TARGET_USER" | ${suPrefix}tee "/etc/sudoers.d/90-claude-bridge-$TARGET_USER" >/dev/null`,
+        `  ${suPrefix}chmod 440 "/etc/sudoers.d/90-claude-bridge-$TARGET_USER"`,
         "fi",
         'TARGET_HOME="$(eval echo ~"$TARGET_USER")"',
-        'mkdir -p "$TARGET_HOME/.ssh"',
-        'touch "$TARGET_HOME/.ssh/authorized_keys"',
-        'grep -qxF "$PUB_KEY" "$TARGET_HOME/.ssh/authorized_keys" || printf "%s\\n" "$PUB_KEY" >> "$TARGET_HOME/.ssh/authorized_keys"',
-        'chmod 700 "$TARGET_HOME/.ssh" && chmod 600 "$TARGET_HOME/.ssh/authorized_keys"',
-        'chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.ssh"',
+        `${suPrefix}mkdir -p "$TARGET_HOME/.ssh"`,
+        `${suPrefix}touch "$TARGET_HOME/.ssh/authorized_keys"`,
+        `${suPrefix}grep -qxF "$PUB_KEY" "$TARGET_HOME/.ssh/authorized_keys" || printf "%s\\n" "$PUB_KEY" | ${suPrefix}tee -a "$TARGET_HOME/.ssh/authorized_keys" >/dev/null`,
+        `${suPrefix}chmod 700 "$TARGET_HOME/.ssh" && ${suPrefix}chmod 600 "$TARGET_HOME/.ssh/authorized_keys"`,
+        `${suPrefix}chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.ssh"`,
         'echo "NON_ROOT_READY=$TARGET_USER"'
       );
     }
@@ -557,7 +586,9 @@ export class SetupWizardManager implements vscode.Disposable {
       return { ok: false, message: `找不到本地私钥文件：${cfg.sshKeyPath}` };
     }
 
+    const engine = normalizeEngineType(cfg.engine);
     const remoteScript = buildRemoteInitScript({
+      engine,
       timezone: options.timezone || "America/New_York",
       remotePort: cfg.remotePort || 7676,
       withDesktop: options.withDesktop,
@@ -573,10 +604,10 @@ export class SetupWizardManager implements vscode.Disposable {
 
     this.logger.info(
       "Wizard",
-      `开始初始化远程 VPS: ${cfg.sshUser}@${cfg.sshHost} (desktop=${options.withDesktop}, tz=${options.timezone})`
+      `开始初始化远程 VPS (${getEngineDisplayName(engine)}): ${cfg.sshUser}@${cfg.sshHost} (port=${cfg.remotePort}, desktop=${options.withDesktop}, tz=${options.timezone})`
     );
     onLog(
-      `正在连接 ${cfg.sshUser}@${cfg.sshHost}${proxy ? `（经由代理 ${proxy.display}）` : "（直连）"}...`
+      `正在连接 ${cfg.sshUser}@${cfg.sshHost}${proxy ? `（经由代理 ${proxy.display}）` : "（直连）"} · 引擎：${getEngineDisplayName(engine)} · 隧道端口：${cfg.remotePort || 7676}...`
     );
 
     const exitCode = await new Promise<number>((resolve) => {
@@ -649,15 +680,18 @@ export class SetupWizardManager implements vscode.Disposable {
       `正在远程启动极简登录桌面: ${targetLabel} (${geometry}, 16位色)`
     );
 
-    // 若远程已装旧版启动脚本（无 Ctrl+Shift+V 粘贴参数），顺手无感升级脚本后再启动
+    const engine = normalizeEngineType(cfg.engine);
+    const deskPorts = computeRemoteDesktopPorts(cfg.remotePort || 7676);
+    // 始终更新为当前引擎与端口对应的启动脚本，保证同机多人不撞端口且终端提示准确
     const latestDeskB64 = Buffer.from(
-      buildLoginDesktopScript(geometry),
+      buildLoginDesktopScript(geometry, engine, cfg.remotePort || 7676),
       "utf8"
     ).toString("base64");
     const remoteStartCmd = [
       'DESK="$HOME/.local/bin/claude-login-desktop"',
-      'if [ ! -x "$DESK" ]; then echo "NOT_INSTALLED"; exit 2; fi',
-      `if ! grep -q "selectToClipboard" "$DESK" 2>/dev/null; then printf '%s' '${latestDeskB64}' | base64 -d > "$DESK" && chmod +x "$DESK"; fi`,
+      'if [ ! -x "$DESK" ] && ! command -v Xtigervnc >/dev/null 2>&1; then echo "NOT_INSTALLED"; exit 2; fi',
+      'mkdir -p "$HOME/.local/bin"',
+      `printf '%s' '${latestDeskB64}' | base64 -d > "$DESK" && chmod +x "$DESK"`,
       `"$DESK" start "${geometry}"`,
     ].join("; ");
 
@@ -677,12 +711,12 @@ export class SetupWizardManager implements vscode.Disposable {
       };
     }
 
-    // 拉起本地加密转发：-L 6080 供本机浏览器看画面；若为非活跃新机同时带 -R 供远程 /mcp 首次授权（不打断主力机）
+    // 拉起本地加密转发：-L 6080 -> 远程独立 noVNC 端口（多用户不撞车）；若为非活跃新机同时带 -R 供远程 /mcp 首次授权
     const tunnelArgs = [
       ...baseArgs,
       "-N",
       "-L",
-      `127.0.0.1:${LOCAL_NOVNC_PORT}:127.0.0.1:6080`,
+      `127.0.0.1:${LOCAL_NOVNC_PORT}:127.0.0.1:${deskPorts.novncPort}`,
     ];
     if (meta?.forwardDevspace) {
       tunnelArgs.push(
@@ -772,12 +806,13 @@ export class SetupWizardManager implements vscode.Disposable {
 
     const b64 = Buffer.from(text, "utf8").toString("base64");
     const proxy = resolveSshProxy(cfg);
+    const deskPorts = computeRemoteDesktopPorts(cfg.remotePort || 7676);
     // 注意：xclip -i 会在后台保持 X11 selection 所有权，必须重定向 stdout/stderr 到 /dev/null 避免 SSH 阻塞
     const remoteCmd = [
-      'if ! pgrep -u "$USER" -f "Xtigervnc :1" >/dev/null 2>&1; then echo "NO_DESKTOP"; exit 2; fi',
+      `if ! pgrep -u "$USER" -f "Xtigervnc ${deskPorts.displayNum}" >/dev/null 2>&1; then echo "NO_DESKTOP"; exit 2; fi`,
       'if ! command -v xclip >/dev/null 2>&1; then sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y xclip >/dev/null 2>&1 || true; fi',
       'if ! command -v xclip >/dev/null 2>&1; then echo "NO_XCLIP"; exit 3; fi',
-      'export DISPLAY=":1"',
+      `export DISPLAY="${deskPorts.displayNum}"`,
       `printf '%s' '${b64}' | base64 -d | xclip -selection clipboard -i >/dev/null 2>&1`,
       `printf '%s' '${b64}' | base64 -d | xclip -selection primary -i >/dev/null 2>&1`,
       'echo "CLIP_OK"',
@@ -855,12 +890,14 @@ export class SetupWizardManager implements vscode.Disposable {
     };
   }
 
-  /** Step 4：一键验收远程 Claude 登录状态与 DevSpace MCP 连通状态 */
+  /** Step 4：一键验收远程 CLI 登录状态与 DevSpace MCP 连通状态（兼容 Claude / Antigravity） */
   public async verifyRemoteReady(
     cfg: BridgeConfig,
     options?: { forwardDevspace?: boolean }
   ): Promise<RemoteVerifyResult> {
+    const engine = normalizeEngineType(cfg.engine);
     const empty: RemoteVerifyResult = {
+      engine,
       sshOk: false,
       claudeInstalled: false,
       claudeVersion: "",
@@ -876,27 +913,47 @@ export class SetupWizardManager implements vscode.Disposable {
     }
 
     const proxy = resolveSshProxy(cfg);
-    const probeScript = [
-      'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
-      'echo "SSH_OK=1"',
-      'CLAUDE_VER=$(claude --version 2>/dev/null || true)',
-      'echo "CLAUDE_VER=$CLAUDE_VER"',
-      'if [ -s "$HOME/.claude/.credentials.json" ]; then echo "CLAUDE_CRED=1"; else echo "CLAUDE_CRED=0"; fi',
-      'if [ -x "$HOME/.local/bin/claude-login-desktop" ]; then echo "DESK_INST=1"; echo "DESK_STAT=$("$HOME/.local/bin/claude-login-desktop" status 2>/dev/null || echo STOPPED)"; else echo "DESK_INST=0"; echo "DESK_STAT=STOPPED"; fi',
-      'MCP_OUT=$(claude mcp list 2>&1 || true)',
-      'if echo "$MCP_OUT" | grep -i "devspace" | grep -qi "connected"; then echo "MCP_OK=1"; else echo "MCP_OK=0"; fi',
-    ].join("; ");
+    const cliBin = shellQuote(resolveRemoteCliPath(cfg));
+    const remotePort = cfg.remotePort || 7676;
+
+    const probeScript =
+      engine === "antigravity"
+        ? [
+            'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+            'echo "SSH_OK=1"',
+            `CLI_VER=$(${cliBin} --version 2>/dev/null | head -n 1 || true)`,
+            'echo "CLAUDE_VER=$CLI_VER"',
+            'CRED_OK=0',
+            'if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] || [ -s "$HOME/.gemini/oauth_creds.json" ]; then CRED_OK=1; fi',
+            `if [ "$CRED_OK" = "1" ] && [ -n "$CLI_VER" ]; then USAGE_OUT=$(timeout 12 ${cliBin} -p /usage 2>&1 || true); if echo "$USAGE_OUT" | grep -qi "authentication required"; then CRED_OK=0; fi; fi`,
+            'echo "CLAUDE_CRED=$CRED_OK"',
+            'if [ -x "$HOME/.local/bin/claude-login-desktop" ]; then echo "DESK_INST=1"; echo "DESK_STAT=$("$HOME/.local/bin/claude-login-desktop" status 2>/dev/null || echo STOPPED)"; else echo "DESK_INST=0"; echo "DESK_STAT=STOPPED"; fi',
+            `MCP_LIST=$(${cliBin} mcp list 2>&1 || true)`,
+            `MCP_CFG=$(cat "$HOME/.gemini/config/mcp_config.json" 2>/dev/null || true)`,
+            `HTTP_CODE=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:${remotePort}/mcp || echo 000)`,
+            'if (echo "$MCP_LIST" | grep -qi "devspace" || echo "$MCP_CFG" | grep -qi "devspace") && [ "$HTTP_CODE" != "000" ]; then echo "MCP_OK=1"; else echo "MCP_OK=0"; fi',
+          ].join("; ")
+        : [
+            'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+            'echo "SSH_OK=1"',
+            `CLAUDE_VER=$(${cliBin} --version 2>/dev/null || true)`,
+            'echo "CLAUDE_VER=$CLAUDE_VER"',
+            'if [ -s "$HOME/.claude/.credentials.json" ]; then echo "CLAUDE_CRED=1"; else echo "CLAUDE_CRED=0"; fi',
+            'if [ -x "$HOME/.local/bin/claude-login-desktop" ]; then echo "DESK_INST=1"; echo "DESK_STAT=$("$HOME/.local/bin/claude-login-desktop" status 2>/dev/null || echo STOPPED)"; else echo "DESK_INST=0"; echo "DESK_STAT=STOPPED"; fi',
+            `MCP_OUT=$(${cliBin} mcp list 2>&1 || true)`,
+            'if echo "$MCP_OUT" | grep -i "devspace" | grep -qi "connected"; then echo "MCP_OK=1"; else echo "MCP_OK=0"; fi',
+          ].join("; ");
 
     const sshArgs = buildBaseSshArgs(cfg, { batchMode: true, proxy: proxy ?? null });
     if (options?.forwardDevspace) {
       sshArgs.push(
         "-R",
-        `127.0.0.1:${cfg.remotePort || 7676}:127.0.0.1:${cfg.localPort || 7676}`
+        `127.0.0.1:${remotePort}:127.0.0.1:${cfg.localPort || 7676}`
       );
     }
     sshArgs.push(`${cfg.sshUser}@${cfg.sshHost}`, probeScript);
 
-    const res = await this.execSsh(sshArgs, 25_000);
+    const res = await this.execSsh(sshArgs, 28_000);
 
     if (!res.ok) {
       return {
@@ -920,15 +977,26 @@ export class SetupWizardManager implements vscode.Disposable {
     const desktopRunning = kv.DESK_STAT === "RUNNING";
 
     let summary = "全部检查通过，可以关闭临时桌面并开始对话！";
-    if (!claudeInstalled) {
-      summary = "远程尚未安装 Claude Code CLI，请先执行第 2 步。";
-    } else if (!claudeLoggedIn) {
-      summary = "远程 Claude 尚未登录账号，请在第 3 步打开登录画面完成登录。";
-    } else if (!devspaceMcpConnected) {
-      summary = "DevSpace MCP 尚未完成首次授权，请确保隧道已连接并在远程执行 /mcp 输入密码。";
+    if (engine === "antigravity") {
+      if (!claudeInstalled) {
+        summary = "远程尚未安装 Antigravity CLI (agy)，请先执行第 2 步。";
+      } else if (!claudeLoggedIn) {
+        summary = "远程 Antigravity 尚未登录 Google 账号，请在第 3 步打开登录画面并在终端输入 agy 完成登录。";
+      } else if (!devspaceMcpConnected) {
+        summary = "DevSpace MCP 未就绪，请确保本机 DevSpace 已启动，并在远程终端运行 agy -> /mcp 完成授权。";
+      }
+    } else {
+      if (!claudeInstalled) {
+        summary = "远程尚未安装 Claude Code CLI，请先执行第 2 步。";
+      } else if (!claudeLoggedIn) {
+        summary = "远程 Claude 尚未登录账号，请在第 3 步打开登录画面完成登录。";
+      } else if (!devspaceMcpConnected) {
+        summary = "DevSpace MCP 尚未完成首次授权，请确保隧道已连接并在远程执行 /mcp 输入密码。";
+      }
     }
 
     return {
+      engine,
       sshOk: true,
       claudeInstalled,
       claudeVersion: kv.CLAUDE_VER || "",
@@ -1057,8 +1125,9 @@ export class SetupWizardManager implements vscode.Disposable {
   }
 }
 
-/** 构造在远程 Ubuntu/Debian VPS 上执行的无交互初始化脚本 */
+/** 构造在远程 Ubuntu/Debian VPS 上执行的无交互初始化脚本（兼容 Claude Code 与 Antigravity，且同机新增同事时自动跳过已装系统包） */
 function buildRemoteInitScript(opts: {
+  engine: AgentEngineType;
   timezone: string;
   remotePort: number;
   withDesktop: boolean;
@@ -1070,23 +1139,85 @@ function buildRemoteInitScript(opts: {
   const safeGeom = /^\d{3,4}x\d{3,4}$/.test(opts.geometry)
     ? opts.geometry
     : "1366x768";
+  const engine = normalizeEngineType(opts.engine);
 
-  return `#!/usr/bin/env bash
-set -euo pipefail
+  const step3And4 =
+    engine === "antigravity"
+      ? `echo "[3/5] 检查并安装 Google Antigravity CLI (agy)..."
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+if ! command -v agy >/dev/null 2>&1; then
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+fi
+echo "Antigravity CLI: $(agy --version 2>/dev/null | head -n 1 || echo installed)"
 
-echo "[1/5] 配置基础工具、英文语言与时区 (${safeTz})..."
-sudo apt-get update -y
-sudo apt-get install -y curl ca-certificates gnupg python3 locales
-sudo locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
-sudo timedatectl set-timezone "${safeTz}" || true
+echo "[4/5] 注册用户级 DevSpace MCP (127.0.0.1:${opts.remotePort}) 并写入防误改 VPS 权限与规则..."
+agy mcp remove devspace >/dev/null 2>&1 || true
+agy mcp add --type http devspace "http://127.0.0.1:${opts.remotePort}/mcp" || true
 
-echo "[2/5] 配置 sshd 服务端心跳（防止切 VPN 残留僵尸端口）..."
-sudo mkdir -p /etc/ssh/sshd_config.d
-printf "ClientAliveInterval 30\\nClientAliveCountMax 3\\n" | sudo tee /etc/ssh/sshd_config.d/99-claude-bridge-keepalive.conf >/dev/null
-sudo sshd -t
-sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+python3 - << 'PY_EOF'
+import json, os
 
-echo "[3/5] 检查并安装 Claude Code CLI..."
+# 1. 确保 ~/.gemini/config/mcp_config.json 包含 devspace 并设长超时
+mcp_path = os.path.expanduser("~/.gemini/config/mcp_config.json")
+os.makedirs(os.path.dirname(mcp_path), exist_ok=True)
+mcp_cfg = {}
+if os.path.exists(mcp_path):
+    try:
+        mcp_cfg = json.loads(open(mcp_path, "r", encoding="utf-8").read())
+    except Exception:
+        mcp_cfg = {}
+servers = mcp_cfg.get("mcpServers")
+if not isinstance(servers, dict):
+    servers = {}
+servers["devspace"] = {
+    "serverUrl": "http://127.0.0.1:${opts.remotePort}/mcp",
+    "timeoutSeconds": 600,
+}
+mcp_cfg["mcpServers"] = servers
+with open(mcp_path, "w", encoding="utf-8") as f:
+    json.dump(mcp_cfg, f, indent=2, ensure_ascii=False)
+
+# 2. 安全合并 ~/.gemini/antigravity-cli/settings.json（放行本地 devspace，禁止直接改动 VPS 文件与执行远程命令）
+set_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+os.makedirs(os.path.dirname(set_path), exist_ok=True)
+set_cfg = {}
+if os.path.exists(set_path):
+    try:
+        set_cfg = json.loads(open(set_path, "r", encoding="utf-8").read())
+    except Exception:
+        set_cfg = {}
+perms = set_cfg.get("permissions")
+if not isinstance(perms, dict):
+    perms = {}
+allow = list(perms.get("allow") or [])
+deny = list(perms.get("deny") or [])
+if "mcp(devspace/*)" not in allow:
+    allow.append("mcp(devspace/*)")
+for rule in ("write_file(*)", "command(*)"):
+    if rule not in deny:
+        deny.append(rule)
+perms["allow"] = allow
+perms["deny"] = deny
+set_cfg["permissions"] = perms
+with open(set_path, "w", encoding="utf-8") as f:
+    json.dump(set_cfg, f, indent=2, ensure_ascii=False)
+PY_EOF
+
+mkdir -p "$HOME/.gemini"
+if [ ! -f "$HOME/.gemini/GEMINI.md" ]; then
+  cat > "$HOME/.gemini/GEMINI.md" << 'RULE_EOF'
+# Workspace Routing Rule (DevSpace MCP)
+
+You are running on a remote host, while the user's actual code repositories live on their local machine and are exposed through the \`devspace\` MCP server.
+
+## Mandatory Rules
+1. Always use \`devspace\` MCP tools to open, browse, search, read, edit, and run commands in the user's local project directories.
+2. Do NOT use remote host filesystem or shell tools (\`view_file\`, \`write_to_file\`, \`replace_file_content\`, \`run_command\`) to look for or modify the user's project source code unless explicitly asked to inspect this remote machine itself.
+3. Keep all file operations strictly inside the user-specified local workspace exposed by DevSpace.
+RULE_EOF
+fi`
+      : `echo "[3/5] 检查并安装 Claude Code CLI..."
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 if ! command -v claude >/dev/null 2>&1; then
   curl -fsSL https://claude.ai/install.sh | bash
@@ -1110,25 +1241,61 @@ You are running on a remote host, while the user's actual code repositories live
 2. Do NOT use remote host filesystem tools (\`Read\`, \`Edit\`, \`Write\`, \`Glob\`, \`Grep\`, \`Bash\`) to look for or modify the user's project source code unless explicitly asked to inspect this remote machine itself.
 3. Keep all file operations strictly inside the user-specified local workspace exposed by DevSpace.
 RULE_EOF
+fi`;
+
+  return `#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[1/5] 检查基础工具、英文语言与时区 (${safeTz})..."
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  sudo apt-get update -y
+  sudo apt-get install -y curl ca-certificates gnupg python3 locales
+else
+  echo "基础工具 (curl / python3) 已就绪，跳过重复安装。"
+fi
+if sudo -n true 2>/dev/null; then
+  sudo locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
+  sudo timedatectl set-timezone "${safeTz}" || true
 fi
 
+echo "[2/5] 检查 sshd 服务端心跳（防止切 VPN 残留僵尸端口）..."
+if [ -f /etc/ssh/sshd_config.d/99-claude-bridge-keepalive.conf ]; then
+  echo "sshd 心跳配置已存在，跳过。"
+elif sudo -n true 2>/dev/null; then
+  sudo mkdir -p /etc/ssh/sshd_config.d
+  printf "ClientAliveInterval 30\\nClientAliveCountMax 3\\n" | sudo tee /etc/ssh/sshd_config.d/99-claude-bridge-keepalive.conf >/dev/null
+  sudo sshd -t
+  sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+else
+  echo "当前用户无免密 sudo，已跳过系统级 sshd 配置（若管理员已初始化过本机可忽略）。"
+fi
+
+${step3And4}
+
 if [ "${opts.withDesktop ? "true" : "false"}" = "true" ]; then
-  echo "[5/5] 安装极简 noVNC 登录桌面（openbox 无背景 + TigerVNC 16位色 + xclip + Google Chrome）..."
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \\
-    tigervnc-standalone-server novnc websockify openbox x11-xserver-utils \\
-    xterm xclip xdg-utils fonts-dejavu-core fonts-noto-cjk wget
+  echo "[5/5] 检查极简 noVNC 登录桌面（openbox + TigerVNC 16位色 + xclip + Google Chrome）..."
+  if ! command -v Xtigervnc >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || ! command -v xclip >/dev/null 2>&1; then
+    sudo apt-get update -y
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \\
+      tigervnc-standalone-server novnc websockify openbox x11-xserver-utils \\
+      xterm xclip xdg-utils fonts-dejavu-core fonts-noto-cjk wget
+  else
+    echo "系统 VNC / noVNC / xclip 组件已安装，跳过重复安装（同机多用户秒装）。"
+  fi
 
   if ! command -v google-chrome >/dev/null 2>&1; then
     wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
     sudo apt-get install -y /tmp/google-chrome.deb
     rm -f /tmp/google-chrome.deb
+  else
+    echo "Google Chrome 已安装，跳过下载。"
   fi
 
   mkdir -p "$HOME/.local/bin"
   cat > "$HOME/.local/bin/claude-login-desktop" << 'DESK_EOF'
-${buildLoginDesktopScript(safeGeom)}DESK_EOF
+${buildLoginDesktopScript(safeGeom, engine, opts.remotePort)}DESK_EOF
   chmod +x "$HOME/.local/bin/claude-login-desktop"
-  echo "极简 noVNC 登录桌面已安装就绪（默认未启动，0 内存占用）。"
+  echo "极简 noVNC 登录桌面已就绪（按用户独立端口隔离，默认未启动，0 内存占用）。"
 else
   echo "[5/5] 已按选项跳过登录桌面安装。"
 fi
@@ -1137,19 +1304,30 @@ echo "ALL_DONE"
 `;
 }
 
-/** 构造远程按需启停脚本 ~/.local/bin/claude-login-desktop（支持 xterm Ctrl+Shift+V 常规粘贴） */
-function buildLoginDesktopScript(defaultGeom: string): string {
+/** 构造远程按需启停脚本 ~/.local/bin/claude-login-desktop（按用户端口隔离 DISPLAY/VNC/noVNC，并随引擎展示登录引导） */
+function buildLoginDesktopScript(
+  defaultGeom: string,
+  engine: AgentEngineType = "claude",
+  remotePort = 7676
+): string {
   const safeGeom = /^\d{3,4}x\d{3,4}$/.test(defaultGeom)
     ? defaultGeom
     : "1366x768";
+  const ports = computeRemoteDesktopPorts(remotePort);
+  const isAgy = engine === "antigravity";
+  const termTitle = isAgy ? "Antigravity Login Terminal" : "Claude Login Terminal";
+  const bannerCmd = isAgy
+    ? 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; echo "=== Antigravity (agy) 首次登录终端 ==="; echo "1. 输入 agy 并按提示在弹出浏览器中登录自己的 Google 账号"; echo "2. 登录完成后在 agy 中输入 /mcp 检查并授权 devspace"; echo "提示：在 VS Code 点「同步剪贴板到远程」后，浏览器按 Ctrl+V、终端按 Ctrl+Shift+V 即可粘贴"; echo ""; exec bash'
+    : 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; echo "=== Claude 首次登录终端 ==="; echo "1. 输入 claude 完成账号登录"; echo "2. 登录后输入 /mcp 授权 devspace"; echo "提示：在 VS Code 点「同步剪贴板到远程」后，浏览器按 Ctrl+V、终端按 Ctrl+Shift+V 即可粘贴"; echo ""; exec bash';
 
   return `#!/usr/bin/env bash
 set -euo pipefail
 ACTION="\${1:-status}"
 GEOM="\${2:-${safeGeom}}"
-DISPLAY_NUM=":1"
-VNC_PORT="5901"
-NOVNC_PORT="6080"
+DISPLAY_NUM="${ports.displayNum}"
+X_INDEX="${ports.xIndex}"
+VNC_PORT="${ports.vncPort}"
+NOVNC_PORT="${ports.novncPort}"
 PID_DIR="$HOME/.cache/claude-login-desktop"
 mkdir -p "$PID_DIR"
 
@@ -1172,7 +1350,7 @@ stop_all() {
   fi
   pkill -u "$USER" -f "websockify.*127\\.0\\.0\\.1:\${NOVNC_PORT}" 2>/dev/null || true
   pkill -u "$USER" -f "Xtigervnc \${DISPLAY_NUM}" 2>/dev/null || true
-  rm -f "/tmp/.X1-lock" "/tmp/.X11-unix/X1" 2>/dev/null || true
+  rm -f "/tmp/.X\${X_INDEX}-lock" "/tmp/.X11-unix/X\${X_INDEX}" 2>/dev/null || true
   echo "STOPPED"
 }
 
@@ -1196,8 +1374,8 @@ start_all() {
   xterm -fa "DejaVu Sans Mono" -fs 11 -bg "#111111" -fg "#eeeeee" -geometry 96x26+40+40 \\
     -xrm 'XTerm*selectToClipboard: true' \\
     -xrm 'XTerm*VT100.translations: #override \\n Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \\n Ctrl Shift <Key>C: copy-selection(CLIPBOARD)' \\
-    -T "Claude Login Terminal" \\
-    -e bash -lc 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; echo "=== Claude 首次登录终端 ==="; echo "1. 输入 claude 完成账号登录"; echo "2. 登录后输入 /mcp 授权 devspace"; echo "提示：在 VS Code 点「同步剪贴板到远程」后，浏览器按 Ctrl+V、终端按 Ctrl+Shift+V 即可粘贴"; echo ""; exec bash' \\
+    -T "${termTitle}" \\
+    -e bash -lc '${bannerCmd}' \\
     >"$PID_DIR/xterm.log" 2>&1 &
 
   websockify --web=/usr/share/novnc "127.0.0.1:\${NOVNC_PORT}" "127.0.0.1:\${VNC_PORT}" \\
