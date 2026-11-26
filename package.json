@@ -2,7 +2,7 @@
   "name": "duduniao",
   "displayName": "DuDuNiao · 渡渡鸟",
   "description": "渡渡鸟 (DuDuNiao)：第三方开源 AI 桥接工具，通过本地 DevSpace MCP 与 SSH 反向隧道连接远程 Linux VPS 上的 Claude Code 与 Google Antigravity (agy)，代码留在本地、AI 流量留在远程，提供多标签侧边栏、多主题、可视化设置中心与 4 步新机配置向导。",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "songshouli123",
   "icon": "media/icon.png",
   "license": "MIT",
