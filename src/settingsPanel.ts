@@ -76,7 +76,7 @@ export class SettingsPanel {
 
     const panel = vscode.window.createWebviewPanel(
       "claudeBridge.settings",
-      "ClaudeBridge · 渡桥 设置中心",
+      "DuDuNiao · 渡渡鸟 设置中心",
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -1109,7 +1109,7 @@ export class SettingsPanel {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClaudeBridge · 渡桥 设置中心</title>
+  <title>DuDuNiao · 渡渡鸟 设置中心</title>
   <link rel="stylesheet" href="${cssUri}" />
 </head>
 <body>
@@ -1122,7 +1122,7 @@ export class SettingsPanel {
           </svg>
         </div>
         <div>
-          <h1>ClaudeBridge · 渡桥</h1>
+          <h1>DuDuNiao · 渡渡鸟</h1>
           <p class="subtitle">可视化配置中心 · 代码留在本地，AI 推理留在远程</p>
         </div>
       </div>

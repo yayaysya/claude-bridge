@@ -1,8 +1,8 @@
-# ClaudeBridge · 渡桥
+# DuDuNiao · 渡渡鸟
 
 > 声明：本项目为独立开发的第三方开源社区工具，与 Anthropic、Google 无官方隶属关系。
 
-**ClaudeBridge（渡桥）** 是一个用于打通 **本地开发环境（Windows / WSL / Linux / macOS）** 与 **远程服务器（AWS EC2 / VPS / 云主机）上 Claude Code CLI 及 Google Antigravity CLI (`agy`)** 的 VS Code 插件。
+**渡渡鸟（DuDuNiao）** 是一个用于打通 **本地开发环境（Windows / WSL / Linux / macOS）** 与 **远程服务器（AWS EC2 / VPS / 云主机）上 Claude Code CLI 及 Google Antigravity CLI (`agy`)** 的 VS Code 插件。
 
 核心理念：**代码始终留在本地，AI 推理与外网流量 100% 留在远程服务器**。通过本地 **DevSpace MCP + SSH 反向隧道** 安全互通，在 VS Code 中提供多标签 Agent 侧边栏、4 套完整视觉主题、可视化设置中心、本机 Skill 同步与 4 步新机配置向导。
 

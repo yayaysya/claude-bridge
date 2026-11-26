@@ -19,7 +19,7 @@ let terminalManager: TerminalManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   setExtensionRootPath(context.extensionPath);
-  const outputChannel = vscode.window.createOutputChannel("ClaudeBridge · 渡桥");
+  const outputChannel = vscode.window.createOutputChannel("DuDuNiao · 渡渡鸟");
   const logger = new BridgeLogger(outputChannel);
   const profileStore = new ProfileStore();
   bridgeManager = new BridgeManager(logger);
@@ -69,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
       case "connected":
         statusBar.text = `$(plug) ${profileName}: 已连接`;
         statusBar.backgroundColor = undefined;
-        statusBar.tooltip = `ClaudeBridge · ${profileName}\n${state.detail}\n点击打开渡桥快捷菜单`;
+        statusBar.tooltip = `渡渡鸟 · ${profileName}\n${state.detail}\n点击打开渡渡鸟快捷菜单`;
         break;
       case "connecting":
         statusBar.text = `$(sync~spin) ${profileName}: 连接中`;
@@ -133,17 +133,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("claudeBridge.connect", async () => {
       const ok = await bridgeManager?.connect(true);
       if (ok) {
-        vscode.window.showInformationMessage("ClaudeBridge 已连接成功。");
+        vscode.window.showInformationMessage("渡渡鸟已连接成功。");
       } else {
         vscode.window.showErrorMessage(
-          "ClaudeBridge 连接失败，请点击状态栏查看诊断日志或打开设置中心。"
+          "渡渡鸟连接失败，请点击状态栏查看诊断日志或打开设置中心。"
         );
       }
     }),
 
     vscode.commands.registerCommand("claudeBridge.disconnect", () => {
       bridgeManager?.disconnect();
-      vscode.window.showInformationMessage("ClaudeBridge 已断开连接。");
+      vscode.window.showInformationMessage("渡渡鸟已断开连接。");
     }),
 
     vscode.commands.registerCommand("claudeBridge.openChat", async () => {
@@ -246,7 +246,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const state = bridgeManager?.getState();
       const items: Array<vscode.QuickPickItem & { action: string }> = [
         {
-          label: "$(comment-discussion) 打开渡桥聊天面板",
+          label: "$(comment-discussion) 打开渡渡鸟聊天面板",
           description: "流式对话 + 工具卡片 + 文件行号跳转",
           action: "chat",
         },
@@ -301,7 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ];
 
       const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: `ClaudeBridge · 渡桥 (${state?.detail ?? "未连接"})`,
+        placeHolder: `DuDuNiao · 渡渡鸟 (${state?.detail ?? "未连接"})`,
       });
       if (!picked) {
         return;

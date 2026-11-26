@@ -84,7 +84,7 @@ export class TerminalManager {
 
     this.lastTerminalKey = key;
     this.terminal = vscode.window.createTerminal({
-      name: engine === "antigravity" ? "ClaudeBridge · AGY" : "ClaudeBridge · Claude",
+      name: engine === "antigravity" ? "渡渡鸟 · AGY" : "渡渡鸟 · Claude",
       shellPath: "ssh",
       shellArgs: sshArgs,
     });

@@ -1578,7 +1578,7 @@ import { Marked, Renderer } from "marked";
       messagesEl.innerHTML =
         '<div class="welcome">' +
         '<div class="welcome-logo">' + ICON_STAR + "</div>" +
-        "<h2>ClaudeBridge · 渡桥</h2>" +
+        "<h2>DuDuNiao · 渡渡鸟</h2>" +
         '<div class="welcome-sub">代码留在本地，AI 推理通过加密专线运行于远程服务器</div>' +
         '<div class="ws-badge"><span class="dot ' + escapeHtml(st) + '"></span>' + wsInner + "</div>" +
         '<div class="prompts-list">' +

@@ -49,7 +49,7 @@
       "activitybar": [
         {
           "id": "claude-bridge-sidebar",
-          "title": "ClaudeBridge · 渡桥",
+          "title": "DuDuNiao · 渡渡鸟",
           "icon": "media/icon.svg"
         }
       ]
@@ -59,72 +59,72 @@
         {
           "type": "webview",
           "id": "claudeBridge.chatView",
-          "name": "渡桥 Claude"
+          "name": "渡渡鸟"
         }
       ]
     },
     "commands": [
       {
         "command": "claudeBridge.connect",
-        "title": "ClaudeBridge: 一键连接 / 重连",
+        "title": "渡渡鸟: 一键连接 / 重连",
         "icon": "$(plug)"
       },
       {
         "command": "claudeBridge.disconnect",
-        "title": "ClaudeBridge: 断开连接",
+        "title": "渡渡鸟: 断开连接",
         "icon": "$(debug-disconnect)"
       },
       {
         "command": "claudeBridge.openChat",
-        "title": "ClaudeBridge: 打开聊天面板"
+        "title": "渡渡鸟: 打开聊天面板"
       },
       {
         "command": "claudeBridge.openTerminal",
-        "title": "ClaudeBridge: 打开原生远程终端",
+        "title": "渡渡鸟: 打开原生远程终端",
         "icon": "$(terminal)"
       },
       {
         "command": "claudeBridge.sendSelection",
-        "title": "ClaudeBridge: 将选中代码发送到聊天"
+        "title": "渡渡鸟: 将选中代码发送到聊天"
       },
       {
         "command": "claudeBridge.addCurrentFile",
-        "title": "ClaudeBridge: 引用当前文件到聊天"
+        "title": "渡渡鸟: 引用当前文件到聊天"
       },
       {
         "command": "claudeBridge.showMenu",
-        "title": "ClaudeBridge: 快捷操作菜单"
+        "title": "渡渡鸟: 快捷操作菜单"
       },
       {
         "command": "claudeBridge.showLogs",
-        "title": "ClaudeBridge: 查看实时输出面板"
+        "title": "渡渡鸟: 查看实时输出面板"
       },
       {
         "command": "claudeBridge.openLogFile",
-        "title": "ClaudeBridge: 打开诊断日志文件 (bridge.log)"
+        "title": "渡渡鸟: 打开诊断日志文件 (bridge.log)"
       },
       {
         "command": "claudeBridge.openSettings",
-        "title": "ClaudeBridge: 打开可视化设置中心",
+        "title": "渡渡鸟: 打开可视化设置中心",
         "icon": "$(gear)"
       },
       {
         "command": "claudeBridge.openSetupWizard",
-        "title": "ClaudeBridge: 打开新机配置向导",
+        "title": "渡渡鸟: 打开新机配置向导",
         "icon": "$(rocket)"
       },
       {
         "command": "claudeBridge.openLocalRules",
-        "title": "ClaudeBridge: 打开本地 CLAUDE.md"
+        "title": "渡渡鸟: 打开本地 CLAUDE.md"
       },
       {
         "command": "claudeBridge.syncRules",
-        "title": "ClaudeBridge: 同步本地 CLAUDE.md 到远程",
+        "title": "渡渡鸟: 同步本地规则到远程",
         "icon": "$(sync)"
       },
       {
         "command": "claudeBridge.viewRemoteMemories",
-        "title": "ClaudeBridge: 拉取并查看远程 Claude 记忆"
+        "title": "渡渡鸟: 拉取并查看远程记忆"
       }
     ],
     "menus": {
@@ -142,7 +142,7 @@
       ]
     },
     "configuration": {
-      "title": "ClaudeBridge · 渡桥",
+      "title": "DuDuNiao · 渡渡鸟",
       "properties": {
         "claudeBridge.sshHost": {
           "type": "string",

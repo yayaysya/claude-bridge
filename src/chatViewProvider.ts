@@ -36,7 +36,7 @@ import {
 } from "./workspaceContext";
 
 /**
- * 侧边栏 Agent 聊天面板（ClaudeBridge · 渡桥）
+ * 侧边栏 Agent 聊天面板（DuDuNiao · 渡渡鸟）
  * 支持流式回复、多 VPS 秒切、草稿与附件持久化、工作区/Git 感知、实时额度与文件行号点击跳转。
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -953,7 +953,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     void vscode.window
       .showWarningMessage(
-        `ClaudeBridge 已连续失败 ${failCount} 次，可能是网络波动或代理变动导致连接异常，建议刷新连接状况。`,
+        `渡渡鸟已连续失败 ${failCount} 次，可能是网络波动或代理变动导致连接异常，建议刷新连接状况。`,
         "刷新连接状况"
       )
       .then(async (choice) => {
@@ -1411,7 +1411,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClaudeBridge · 渡桥</title>
+  <title>DuDuNiao · 渡渡鸟</title>
   <link rel="stylesheet" href="${cssUri}" />
 </head>
 <body>
